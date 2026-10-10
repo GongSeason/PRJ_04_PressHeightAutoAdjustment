@@ -78,6 +78,36 @@
             <Setter Property="FontSize" Value="13"/>
             <Setter Property="CaretBrush" Value="#FFFAFAFA"/>
         </Style>
+
+        <!-- 数值微调（Spinner）上下按钮样式 -->
+        <Style x:Key="SpinnerButton" TargetType="Button">
+            <Setter Property="Background" Value="#FF252525"/>
+            <Setter Property="Foreground" Value="#FFFAFAFA"/>
+            <Setter Property="BorderBrush" Value="#FF333333"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="FontSize" Value="9"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#FF2E2E2E"/>
+                                <Setter TargetName="border" Property="BorderBrush" Value="#FF00BFA5"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#FF1A1A1A"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <Window.DataContext>
@@ -168,6 +198,7 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
                             <!-- 标题 + 状态 -->
@@ -227,6 +258,50 @@
                                                Foreground="#FFFAFAFA"/>
                                 </StackPanel>
                             </Grid>
+
+                            <!-- 手动调整（人工干预）-->
+                            <Border Grid.Row="4" Background="#FF1A1A1A" CornerRadius="6" Padding="10,8" Margin="0,10,0,0">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Grid.Row="0" Grid.ColumnSpan="3" Text="手动调整 (增量 mm，正=下降)"
+                                               FontSize="10" Foreground="#FF757575" Margin="0,0,0,6"/>
+
+                                    <!-- 数值输入框 -->
+                                    <TextBox Grid.Row="1" Grid.Column="0" Style="{StaticResource InputStyle}"
+                                             VerticalContentAlignment="Center" Margin="0,0,4,0"
+                                             Text="{Binding HeadAManualDelta, UpdateSourceTrigger=PropertyChanged, StringFormat=F5, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
+                                             ToolTip="允许输入小数的手动增量值 (mm)，正=下降、负=上升；受单步限幅约束。"/>
+
+                                    <!-- 上下微调按钮 -->
+                                    <Grid Grid.Row="1" Grid.Column="1" Width="22" Margin="0,0,6,0">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="*"/>
+                                            <RowDefinition Height="*"/>
+                                        </Grid.RowDefinitions>
+                                        <Button Grid.Row="0" Content="▲" Style="{StaticResource SpinnerButton}"
+                                                Command="{Binding StepManualDeltaCommand}" CommandParameter="0:1"
+                                                ToolTip="增加一步 (+0.001mm)"/>
+                                        <Button Grid.Row="1" Content="▼" Style="{StaticResource SpinnerButton}"
+                                                Command="{Binding StepManualDeltaCommand}" CommandParameter="0:-1"
+                                                ToolTip="减少一步 (-0.001mm)"/>
+                                    </Grid>
+
+                                    <!-- 写入按钮 -->
+                                    <Button Grid.Row="1" Grid.Column="2" Content="写入" FontSize="12"
+                                            Style="{StaticResource IndustrialButton}" Padding="12,0"
+                                            Command="{Binding ManualAdjustCommand}" CommandParameter="0"
+                                            ToolTip="把上面的增量值写入铆压#1 的调整地址。"/>
+                                </Grid>
+                            </Border>
                         </Grid>
                     </Border>
 
@@ -234,6 +309,7 @@
                     <Border Grid.Column="1" Grid.RowSpan="2" Style="{StaticResource CardBorder}" Margin="6,0,6,0">
                         <Grid>
                             <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
@@ -297,6 +373,50 @@
                                                Foreground="#FFFAFAFA"/>
                                 </StackPanel>
                             </Grid>
+
+                            <!-- 手动调整（人工干预）-->
+                            <Border Grid.Row="4" Background="#FF1A1A1A" CornerRadius="6" Padding="10,8" Margin="0,10,0,0">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Grid.Row="0" Grid.ColumnSpan="3" Text="手动调整 (增量 mm，正=下降)"
+                                               FontSize="10" Foreground="#FF757575" Margin="0,0,0,6"/>
+
+                                    <!-- 数值输入框 -->
+                                    <TextBox Grid.Row="1" Grid.Column="0" Style="{StaticResource InputStyle}"
+                                             VerticalContentAlignment="Center" Margin="0,0,4,0"
+                                             Text="{Binding HeadBManualDelta, UpdateSourceTrigger=PropertyChanged, StringFormat=F5, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
+                                             ToolTip="允许输入小数的手动增量值 (mm)，正=下降、负=上升；受单步限幅约束。"/>
+
+                                    <!-- 上下微调按钮 -->
+                                    <Grid Grid.Row="1" Grid.Column="1" Width="22" Margin="0,0,6,0">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="*"/>
+                                            <RowDefinition Height="*"/>
+                                        </Grid.RowDefinitions>
+                                        <Button Grid.Row="0" Content="▲" Style="{StaticResource SpinnerButton}"
+                                                Command="{Binding StepManualDeltaCommand}" CommandParameter="1:1"
+                                                ToolTip="增加一步 (+0.001mm)"/>
+                                        <Button Grid.Row="1" Content="▼" Style="{StaticResource SpinnerButton}"
+                                                Command="{Binding StepManualDeltaCommand}" CommandParameter="1:-1"
+                                                ToolTip="减少一步 (-0.001mm)"/>
+                                    </Grid>
+
+                                    <!-- 写入按钮 -->
+                                    <Button Grid.Row="1" Grid.Column="2" Content="写入" FontSize="12"
+                                            Style="{StaticResource IndustrialButton}" Padding="12,0"
+                                            Command="{Binding ManualAdjustCommand}" CommandParameter="1"
+                                            ToolTip="把上面的增量值写入铆压#2 的调整地址。"/>
+                                </Grid>
+                            </Border>
                         </Grid>
                     </Border>
 
@@ -373,8 +493,13 @@
                     </Border>
                 </Grid>
 
-                <!-- 趋势图 -->
-                <Border Grid.Row="1" Style="{StaticResource CardBorder}">
+                <!-- 高度趋势图 + PLC 补偿值趋势图 -->
+                <Grid Grid.Row="1">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="1.2*"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <Border Grid.Row="0" Style="{StaticResource CardBorder}">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -399,18 +524,60 @@
                         <!-- 自定义图例 + 产品可见性控制 -->
                         <StackPanel Grid.Row="1" Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
                             <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-                                <Border Width="16" Height="3" Background="#FFFF006E" VerticalAlignment="Center" CornerRadius="1"/>
-                                <CheckBox Content="1高度" IsChecked="{Binding IsP1Visible}" Foreground="#FFFF006E"
+                                <Border Width="16" Height="3" Background="#FF42A5F5" VerticalAlignment="Center" CornerRadius="1"/>
+                                <CheckBox Content="铆压#1" IsChecked="{Binding IsP1Visible}" Foreground="#FF42A5F5"
                                           Margin="6,0,0,0" VerticalAlignment="Center" FontSize="11"/>
                             </StackPanel>
                             <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-                                <Border Width="16" Height="3" Background="#FF8338EC" VerticalAlignment="Center" CornerRadius="1"/>
-                                <CheckBox Content="2高度" IsChecked="{Binding IsP2Visible}" Foreground="#FF8338EC"
+                                <Border Width="16" Height="3" Background="#FFFFB74D" VerticalAlignment="Center" CornerRadius="1"/>
+                                <CheckBox Content="铆压#2" IsChecked="{Binding IsP2Visible}" Foreground="#FFFFB74D"
                                           Margin="6,0,0,0" VerticalAlignment="Center" FontSize="11"/>
                             </StackPanel>
                         </StackPanel>
                     </Grid>
-                </Border>
+                    </Border>
+
+                    <Border Grid.Row="1" Style="{StaticResource CardBorder}" Margin="0,8,0,0">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+
+                            <TextBlock Grid.Row="0" Grid.ColumnSpan="2"
+                                       Text="PLC 补偿值波动 (每次刷新计算的下发值)"
+                                       FontSize="12" FontWeight="Bold" Foreground="#FFB0B0B0" Margin="0,0,0,8"/>
+
+                            <lvc:CartesianChart Grid.Row="1" Grid.Column="0"
+                                                Series="{Binding CompensationSeries}"
+                                                XAxes="{Binding CompensationXAxes}"
+                                                YAxes="{Binding CompensationYAxes}"
+                                                Sections="{Binding CompensationSections}"
+                                                LegendPosition="Hidden"
+                                                TooltipPosition="Center"/>
+
+                            <StackPanel Grid.Row="1" Grid.Column="1" Margin="16,0,0,0"
+                                        VerticalAlignment="Center">
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                                    <Border Width="16" Height="3" Background="#FF42A5F5"
+                                            VerticalAlignment="Center" CornerRadius="1"/>
+                                    <TextBlock Text="铆压#1 补偿值" Foreground="#FF42A5F5"
+                                               Margin="6,0,0,0" VerticalAlignment="Center" FontSize="11"/>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal">
+                                    <Border Width="16" Height="3" Background="#FFFFB74D"
+                                            VerticalAlignment="Center" CornerRadius="1"/>
+                                    <TextBlock Text="铆压#2 补偿值" Foreground="#FFFFB74D"
+                                               Margin="6,0,0,0" VerticalAlignment="Center" FontSize="11"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </Grid>
             </Grid>
 
             <!-- 设置面板 -->
@@ -428,40 +595,48 @@
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
                             <TextBox Grid.Column="0" Text="{Binding Settings.MonitorPath, UpdateSourceTrigger=PropertyChanged}"
-                                     Style="{StaticResource InputStyle}" Margin="0,0,6,0"/>
+                                     Style="{StaticResource InputStyle}" Margin="0,0,6,0"
+                                     ToolTip="存放压接数据 CSV 的文件夹，程序每隔刷新间隔从这里读取最新数据。"/>
                             <Button Grid.Column="1" Content="..." Command="{Binding BrowseFolderCommand}"
                                     Style="{StaticResource IndustrialButton}" Padding="10,5" VerticalAlignment="Top" FontSize="12"/>
                         </Grid>
 
                         <TextBlock Text="扫描天数（0=全部）" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.ScanDays, UpdateSourceTrigger=PropertyChanged}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,12"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,12"
+                                 ToolTip="只加载最近 N 天的 CSV 数据；填 0 表示加载全部历史数据。"/>
 
                         <Border Height="1" Background="#FF2A2A2A" Margin="0,4,0,12"/>
 
                         <TextBlock Text="上限 (mm)" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Controller.UpperLimit, UpdateSourceTrigger=LostFocus, StringFormat=F4, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="压接高度合格规格的上限。上限与下限的中点自动作为目标值（趋势图上的白线）。必须大于下限。"/>
 
                         <TextBlock Text="下限 (mm)" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Controller.LowerLimit, UpdateSourceTrigger=LostFocus, StringFormat=F4, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="压接高度合格规格的下限。与上限共同决定目标中点。"/>
 
                         <TextBlock Text="截尾比例" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Controller.TrimPercentage, UpdateSourceTrigger=LostFocus, StringFormat=F4, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="算均值前砍掉两端各百分之几的极端值以抗离群点（0.05 = 5%）。取值范围 [0, 0.5)。"/>
 
                         <TextBlock Text="容差上限 (mm)" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Controller.UpperTolerance, UpdateSourceTrigger=LostFocus, StringFormat=F4, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="偏差向上的容忍量（死区）。偏差在 +容差内视为稳定不动作，超出才触发向下补偿。"/>
 
                         <TextBlock Text="容差下限 (mm)" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Controller.LowerTolerance, UpdateSourceTrigger=LostFocus, StringFormat=F4, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="偏差向下的容忍量（死区）。偏差在 -容差内视为稳定不动作，超出才触发向上补偿。"/>
 
                         <TextBlock Text="刷新间隔 (秒)" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.RefreshIntervalSeconds, UpdateSourceTrigger=PropertyChanged}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="多久跑一次“读数据→分析→下发补偿”整条流程，单位秒，必须大于 0。"/>
 
                         <Border Height="1" Background="#FF2A2A2A" Margin="0,4,0,12"/>
 
@@ -469,43 +644,53 @@
 
                         <TextBlock Text="增益 K" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Controller.ControllerGain, UpdateSourceTrigger=LostFocus, StringFormat=F4, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="偏差转成补偿值的比例系数。K 越大补得越猛、收敛越快；越小越平稳（阻尼）。"/>
 
                         <TextBlock Text="发散阈值 T (mm)" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Controller.DivergenceThreshold, UpdateSourceTrigger=LostFocus, StringFormat=F4, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="偏差绝对值超过此值后开始分级处理：正常 → 降档（降K）→ 停机。必须大于 0。"/>
 
                         <TextBlock Text="降K系数" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Controller.DegradedGainFactor, UpdateSourceTrigger=LostFocus, StringFormat=F4, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="进入降档区时把增益 K 乘以此系数，更保守地调整（0.5 = K 减半）。取值范围 [0, 1]。"/>
 
                         <TextBlock Text="最小样本数" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Controller.MinSamplesPerEpoch, UpdateSourceTrigger=PropertyChanged}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="有效样本少于此数即判 WarmUp（置信不足），只采集不动作。必须在 1 到窗口大小之间。"/>
 
                         <TextBlock Text="Drift 拍数 N" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Controller.DriftConfirmCycles, UpdateSourceTrigger=PropertyChanged}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="连续 N 拍同方向漂移才确认为真漂移，用于过滤偶发抖动。必须大于 0。"/>
 
                         <TextBlock Text="Drift Slope 门限 (mm/拍)" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Controller.DriftSlopeThreshold, UpdateSourceTrigger=LostFocus, StringFormat=F4, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="漂移斜率绝对值低于此门限就当作噪声、不判漂移。"/>
 
                         <TextBlock Text="窗口大小" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Controller.WindowSize, UpdateSourceTrigger=PropertyChanged}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="每次取最近多少条有效数据参与计算。越大越平滑、反应越慢。必须大于 0。"/>
 
                         <TextBlock Text="单步限幅 (mm)" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Controller.MaxStepPerAdjust, UpdateSourceTrigger=LostFocus, StringFormat=F4, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="单次补偿值的最大步长，防止一次调过头。必须大于 0。"/>
 
                         <TextBlock Text="安全上限 (mm)" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Controller.SafetyUpperBound, UpdateSourceTrigger=LostFocus, StringFormat=F4, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="均值超过此物理合理上限即判 Outlier（异常）并停机报警。必须高于规格上限。"/>
 
                         <TextBlock Text="安全下限 (mm)" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Controller.SafetyLowerBound, UpdateSourceTrigger=LostFocus, StringFormat=F4, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,14"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,14"
+                                 ToolTip="均值低于此物理合理下限即判 Outlier（异常）并停机报警。必须低于规格下限（安全范围要包住规格范围）。"/>
 
                         <Border Height="1" Background="#FF2A2A2A" Margin="0,4,0,12"/>
 
@@ -513,7 +698,8 @@
 
                         <!-- PLC 启用开关 -->
                         <CheckBox Content="启用 PLC 通信" IsChecked="{Binding Settings.Plc.UseRealPlc}"
-                                  Foreground="#FFFAFAFA" FontSize="13" Margin="0,0,0,12"/>
+                                  Foreground="#FFFAFAFA" FontSize="13" Margin="0,0,0,12"
+                                  ToolTip="勾选后连接真实 PLC 并真正读写寄存器；不勾选则使用模拟模式，仅本地演算不下发。"/>
 
                         <!-- PLC 连接状态 -->
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
@@ -523,35 +709,43 @@
 
                         <TextBlock Text="PLC IP 地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Plc.IpAddress, UpdateSourceTrigger=PropertyChanged}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="Keyence PLC 的网络 IP 地址（采用 MC 协议通信）。"/>
 
                         <TextBlock Text="PLC 端口" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Plc.Port, UpdateSourceTrigger=PropertyChanged}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="PLC 通信端口号，需在 1 到 65535 之间，与 PLC 侧 MC 协议端口一致。"/>
 
                         <TextBlock Text="连接超时 (ms)" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Plc.ConnectTimeoutMs, UpdateSourceTrigger=PropertyChanged}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="建立连接时的最长等待时间（毫秒），超时判为连接失败。必须大于 0。"/>
 
                         <TextBlock Text="压头A调整地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Plc.HeadAAdjustAddress, UpdateSourceTrigger=PropertyChanged}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="铆压#1 补偿值的写入寄存器（如 D100）。程序把补偿值 ×100000 取整为整数写入，PLC 梯形图需对应缩放回 mm。"/>
 
                         <TextBlock Text="压头B调整地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Plc.HeadBAdjustAddress, UpdateSourceTrigger=PropertyChanged}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="铆压#2 补偿值的写入寄存器（如 D102）。写入方式同压头A（×100000 的整数）。"/>
 
                         <TextBlock Text="停机信号地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Plc.StopSignalAddress, UpdateSourceTrigger=PropertyChanged}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="触发停机时向此寄存器写入 1（1=停机，如 D200），用于异常/发散/数据失活时停机。"/>
 
                         <TextBlock Text="压头A位置地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Plc.HeadAPositionAddress, UpdateSourceTrigger=PropertyChanged}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="读取铆压#1 当前位置的寄存器（如 D300），按 32 位浮点数读取，显示在界面“当前位置”。"/>
 
                         <TextBlock Text="压头B位置地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Plc.HeadBPositionAddress, UpdateSourceTrigger=PropertyChanged}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,14"/>
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,14"
+                                 ToolTip="读取铆压#2 当前位置的寄存器（如 D302），按 32 位浮点数读取。"/>
 
                         <Button Content="保存设置" Command="{Binding SaveSettingsCommand}"
                                 Style="{StaticResource IndustrialButton}" Width="268"

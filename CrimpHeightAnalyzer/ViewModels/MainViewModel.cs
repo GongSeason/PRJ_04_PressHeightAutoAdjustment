@@ -82,6 +82,20 @@ public partial class MainViewModel : ObservableObject
 
     #endregion
 
+    #region 手动调整
+
+    // 手动写入的增量值 (mm)，正=下降，负=上升；与自动下发语义一致。
+    [ObservableProperty]
+    private double headAManualDelta;
+
+    [ObservableProperty]
+    private double headBManualDelta;
+
+    // 上下微调按钮的步进量 (mm)。
+    private const double ManualDeltaStep = 0.001;
+
+    #endregion
+
     #region 压头A 分析结果
 
     [ObservableProperty]
@@ -192,6 +206,12 @@ public partial class MainViewModel : ObservableObject
     private LineSeries<double>? _p1Series;
     private LineSeries<double>? _p2Series;
 
+    private const int CompensationHistoryLimit = 300;
+    // 以自增索引作为 X 轴（第几次刷新计算），而非时间；仅追踪补偿值波动。
+    private readonly ObservableCollection<ObservablePoint> _headACompensationValues = new();
+    private readonly ObservableCollection<ObservablePoint> _headBCompensationValues = new();
+    private int _compensationIndex;
+
     public ISeries[] DistributionSeries { get; set; } = Array.Empty<ISeries>();
     public ISeries[] TrendSeries { get; set; } = Array.Empty<ISeries>();
     public Axis[] TrendXAxes { get; set; } = Array.Empty<Axis>();
@@ -199,6 +219,10 @@ public partial class MainViewModel : ObservableObject
     public Axis[] DistributionXAxes { get; set; } = Array.Empty<Axis>();
     public Axis[] DistributionYAxes { get; set; } = Array.Empty<Axis>();
     public RectangularSection[] TrendSections { get; set; } = Array.Empty<RectangularSection>();
+    public ISeries[] CompensationSeries { get; private set; } = Array.Empty<ISeries>();
+    public Axis[] CompensationXAxes { get; private set; } = Array.Empty<Axis>();
+    public Axis[] CompensationYAxes { get; private set; } = Array.Empty<Axis>();
+    public RectangularSection[] CompensationSections { get; private set; } = Array.Empty<RectangularSection>();
 
     partial void OnIsP1VisibleChanged(bool value) { if (_p1Series != null) _p1Series.IsVisible = value; }
     partial void OnIsP2VisibleChanged(bool value) { if (_p2Series != null) _p2Series.IsVisible = value; }
@@ -377,6 +401,9 @@ public partial class MainViewModel : ObservableObject
                 UpdateHeadBResults(headBResult);
                 UpdateAlerts(alerts);
                 UpdateCharts(_currentData);
+                AppendCompensationPoint(
+                    headAResult.Decision.AdjustmentDelta,
+                    headBResult.Decision.AdjustmentDelta);
                 UpdateHeadPositions(headAPosition, headBPosition);
                 StatusText = $"数据加载完成 - {_currentData.Count}条记录";
                 IsLoading = false;
@@ -395,6 +422,83 @@ public partial class MainViewModel : ObservableObject
         HeadBCurrentPosition = headBPosition.HasValue ? $"{headBPosition.Value:F5}mm" : "--";
     }
 
+    /// <summary>
+    /// 上下微调按钮：对指定压头的手动增量做 +/- 步进。
+    /// 参数格式 "头索引:方向"，方向 +1/-1，例如 "0:1"=压头A 增、"1:-1"=压头B 减。
+    /// </summary>
+    [RelayCommand]
+    private void StepManualDelta(string? param)
+    {
+        if (string.IsNullOrWhiteSpace(param)) return;
+        var parts = param.Split(':');
+        if (parts.Length != 2
+            || !int.TryParse(parts[0], out int headIndex)
+            || !int.TryParse(parts[1], out int direction)
+            || headIndex is not (0 or 1))
+        {
+            return;
+        }
+
+        double step = Math.Sign(direction) * ManualDeltaStep;
+        if (headIndex == 0)
+            HeadAManualDelta = Math.Round(HeadAManualDelta + step, 5);
+        else
+            HeadBManualDelta = Math.Round(HeadBManualDelta + step, 5);
+    }
+
+    /// <summary>
+    /// 手动把一个增量值写入对应压头的调整地址（人工干预通道）。
+    /// 复用 SendAdjustmentAsync，与自动下发共用 ×100000 取整、日志等逻辑。
+    /// </summary>
+    [RelayCommand]
+    private async Task ManualAdjustAsync(string? headParam)
+    {
+        if (_dataProvider == null) return;
+
+        if (!int.TryParse(headParam, out int headIndex) || headIndex is not (0 or 1))
+        {
+            StatusText = "手动写入失败: 压头参数无效";
+            return;
+        }
+
+        var plcAdapter = _plcAdapter;
+        if (plcAdapter == null)
+        {
+            StatusText = "手动写入失败: PLC 未就绪";
+            return;
+        }
+
+        string headName = headIndex == 0 ? "铆压#1" : "铆压#2";
+        double delta = headIndex == 0 ? HeadAManualDelta : HeadBManualDelta;
+
+        if (!double.IsFinite(delta) || delta == 0)
+        {
+            StatusText = $"手动写入已跳过: {headName} 调整量为 0 或无效";
+            return;
+        }
+
+        // 安全护栏：单次手动增量不得超过单步限幅，避免误操作一次调过头。
+        double maxStep = Settings.Controller.MaxStepPerAdjust;
+        if (Math.Abs(delta) > maxStep)
+        {
+            StatusText = $"手动写入被拒绝: {headName} Δ={delta:F5}mm 超过单步限幅 ±{maxStep:F5}mm";
+            return;
+        }
+
+        try
+        {
+            StatusText = $"正在手动写入 {headName} Δ={delta:F5}mm ...";
+            bool ok = await plcAdapter.SendAdjustmentAsync(headIndex, delta);
+            StatusText = ok
+                ? $"手动写入成功: {headName} Δ={delta:F5}mm"
+                : $"手动写入失败: {headName} 未能写入 PLC（检查连接/地址）";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"手动写入异常: {ex.Message}";
+        }
+    }
+
     #endregion
 
     #region 私有方法
@@ -408,16 +512,19 @@ public partial class MainViewModel : ObservableObject
         _dataUnavailableSince = null;
         _plcCommandDataTimestamp = null;
         _issuedPlcCommandKeys.Clear();
+        _compensationIndex = 0;
+        _headACompensationValues.Clear();
+        _headBCompensationValues.Clear();
         InitPlcAdapter();
     }
 
-    private async Task SendPlcCommandsAsync(
+    private async Task<(bool HeadASent, bool HeadBSent)> SendPlcCommandsAsync(
         DateTime? dataTimestamp,
         HeadDecision headADecision,
         HeadDecision headBDecision)
     {
         var plcAdapter = _plcAdapter;
-        if (plcAdapter == null) return;
+        if (plcAdapter == null) return (false, false);
 
         PreparePlcCommandVersion(dataTimestamp);
 
@@ -428,8 +535,11 @@ public partial class MainViewModel : ObservableObject
                 ? headADecision.Reason
                 : headBDecision.Reason;
             await SendStopOnceAsync(dataTimestamp, stopKey, reason);
-            return;
+            return (false, false);
         }
+
+        bool headASent = false;
+        bool headBSent = false;
 
         if (headADecision.RequiresAction)
         {
@@ -438,7 +548,8 @@ public partial class MainViewModel : ObservableObject
             if (!_issuedPlcCommandKeys.Contains(headAKey))
             {
                 // 仅在写入成功后记录，失败时保留重试机会，避免调整量被漏发。
-                if (await plcAdapter.SendAdjustmentAsync(0, headADecision.AdjustmentDelta))
+                headASent = await plcAdapter.SendAdjustmentAsync(0, headADecision.AdjustmentDelta);
+                if (headASent)
                     _issuedPlcCommandKeys.Add(headAKey);
             }
         }
@@ -449,10 +560,13 @@ public partial class MainViewModel : ObservableObject
                 $"adjust|1|{headBDecision.AdjustmentDelta:R}");
             if (!_issuedPlcCommandKeys.Contains(headBKey))
             {
-                if (await plcAdapter.SendAdjustmentAsync(1, headBDecision.AdjustmentDelta))
+                headBSent = await plcAdapter.SendAdjustmentAsync(1, headBDecision.AdjustmentDelta);
+                if (headBSent)
                     _issuedPlcCommandKeys.Add(headBKey);
             }
         }
+
+        return (headASent, headBSent);
     }
 
     private async Task SendStopOnceAsync(
@@ -761,6 +875,86 @@ public partial class MainViewModel : ObservableObject
                 SeparatorsPaint = separatorPaint
             }
         };
+
+        SetupCompensationChart();
+    }
+
+    private void SetupCompensationChart()
+    {
+        var headAColor = new SKColor(66, 165, 245);
+        var headBColor = new SKColor(255, 183, 77);
+
+        CompensationSeries = new ISeries[]
+        {
+            new LineSeries<ObservablePoint>
+            {
+                Name = "铆压#1 补偿值",
+                Values = _headACompensationValues,
+                Stroke = new SolidColorPaint(headAColor) { StrokeThickness = 2 },
+                GeometrySize = 5,
+                GeometryFill = new SolidColorPaint(headAColor),
+                GeometryStroke = null,
+                LineSmoothness = 0
+            },
+            new LineSeries<ObservablePoint>
+            {
+                Name = "铆压#2 补偿值",
+                Values = _headBCompensationValues,
+                Stroke = new SolidColorPaint(headBColor) { StrokeThickness = 2 },
+                GeometrySize = 5,
+                GeometryFill = new SolidColorPaint(headBColor),
+                GeometryStroke = null,
+                LineSmoothness = 0
+            }
+        };
+
+        CompensationXAxes = new[]
+        {
+            new Axis
+            {
+                Name = "索引",
+                NamePaint = new SolidColorPaint(new SKColor(176, 176, 176)),
+                LabelsPaint = new SolidColorPaint(new SKColor(117, 117, 117)),
+                SeparatorsPaint = new SolidColorPaint(new SKColor(42, 42, 42)),
+                MinStep = 1,
+                Labeler = value => value.ToString("F0")
+            }
+        };
+
+        CompensationYAxes = new[]
+        {
+            new Axis
+            {
+                Name = "补偿值 (mm)",
+                NamePaint = new SolidColorPaint(new SKColor(176, 176, 176)),
+                LabelsPaint = new SolidColorPaint(new SKColor(117, 117, 117)),
+                SeparatorsPaint = new SolidColorPaint(new SKColor(42, 42, 42))
+            }
+        };
+
+        // y=0 参考线，便于观察补偿值正负波动。
+        CompensationSections = new[]
+        {
+            new RectangularSection
+            {
+                Yi = 0,
+                Yj = 0,
+                Stroke = new SolidColorPaint(new SKColor(255, 255, 255, 60)) { StrokeThickness = 1 },
+                Fill = null
+            }
+        };
+    }
+
+    private void AppendCompensationPoint(double headAValue, double headBValue)
+    {
+        double x = ++_compensationIndex;
+        _headACompensationValues.Add(new ObservablePoint(x, headAValue));
+        _headBCompensationValues.Add(new ObservablePoint(x, headBValue));
+
+        while (_headACompensationValues.Count > CompensationHistoryLimit)
+            _headACompensationValues.RemoveAt(0);
+        while (_headBCompensationValues.Count > CompensationHistoryLimit)
+            _headBCompensationValues.RemoveAt(0);
     }
 
     private void UpdateCharts(List<CrimpData> data)
@@ -779,7 +973,7 @@ public partial class MainViewModel : ObservableObject
         {
             Name = "1高度 (铆压#1)",
             Values = p1Values,
-            Stroke = new SolidColorPaint(new SKColor(255, 0, 110)) { StrokeThickness = 2.5f },
+            Stroke = new SolidColorPaint(new SKColor(66, 165, 245)) { StrokeThickness = 2.5f },
             GeometryStroke = null,
             GeometryFill = null,
             GeometrySize = 0,
@@ -791,7 +985,7 @@ public partial class MainViewModel : ObservableObject
         {
             Name = "2高度 (铆压#2)",
             Values = p2Values,
-            Stroke = new SolidColorPaint(new SKColor(131, 56, 236)) { StrokeThickness = 2.5f },
+            Stroke = new SolidColorPaint(new SKColor(255, 183, 77)) { StrokeThickness = 2.5f },
             GeometryStroke = null,
             GeometryFill = null,
             GeometrySize = 0,

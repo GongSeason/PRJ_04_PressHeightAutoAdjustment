@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="CrimpHeight.Core/CrimpHeight.Core.csproj" />
+  <Project Path="CrimpHeightAnalyzer/CrimpHeightAnalyzer.csproj" />
+</Solution>

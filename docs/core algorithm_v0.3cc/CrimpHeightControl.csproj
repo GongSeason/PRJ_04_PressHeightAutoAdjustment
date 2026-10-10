@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- netstandard2.0 兼容 .NET Framework 4.6.1+ 与 .NET Core/.NET 5+；语言降到 7.3 避免新语法 -->
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <RootNamespace>CrimpHeightControl</RootNamespace>
+    <AssemblyName>CrimpHeightControl</AssemblyName>
+    <!-- 1591：抑制“缺少 XML 注释”警告（部分内部成员未注释） -->
+    <NoWarn>1591</NoWarn>
+  </PropertyGroup>
+
+</Project>

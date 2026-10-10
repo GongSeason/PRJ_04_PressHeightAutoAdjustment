@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(claude *)",
+      "Bash(npm update *)",
+      "Bash(dotnet *)",
+      "Bash(taskkill /IM CrimpHeightAnalyzer.exe /F)",
+      "Bash(taskkill /PID 32508 /F)",
+      "Bash(npm view *)",
+      "Bash(git init *)",
+      "Bash(git remote *)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'init: CrimpHeightAnalyzer WPF project *)",
+      "Bash(git push *)",
+      "Bash(git pull *)",
+      "Bash(mkdir -p Models Statistics Controller Safety Interfaces)",
+      "Bash(rm -f Class1.cs)",
+      "Bash(rm -f Services/AnalysisService.cs Services/CsvParserService.cs Services/FileScannerService.cs Helpers/MathHelper.cs Models/AnalysisResult.cs Models/CrimpData.cs)",
+      "Bash(rmdir Helpers)",
+      "Bash(git commit -m 'refactor: 重构为 R2R 控制系统 \\(PRD v0.3 v1最小核\\) *)",
+      "Bash(git commit -m 'refactor: 精简配置参数，去除冗余 *)",
+      "Bash(git commit -m 'docs: 添加系统使用手册 *)",
+      "Bash(git commit -m 'style: 深色主题升级为高级黑 *)",
+      "Bash(git commit -m 'feat: 无边框窗口 + 自定义窗口控制按钮 *)",
+      "Bash(git commit -m 'refactor: 重新布局，消除滚动条 *)",
+      "Bash(git commit -m 'fix: 窗口控制按钮改为 Border + TextBlock，确保可见 *)",
+      "Bash(git commit -m 'fix: 恢复四边拖拽缩放（WindowChrome） *)",
+      "Bash(git commit -m 'fix: 去掉右下角缩放手柄 *)",
+      "Bash(git commit -m 'fix: 去掉 AllowsTransparency，修复首次打开按钮不显示 *)",
+      "Bash(git commit -m 'fix: Loaded 事件强制布局刷新，修复首次渲染不完整 *)",
+      "Bash(git commit -m 'fix: 去掉 WindowChrome，改用 WM_NCHITTEST 实现窗口缩放 *)",
+      "Bash(git commit -m 'fix: 彻底修复窗口控件和首次渲染问题 *)",
+      "Bash(git commit -m 'fix: DwmExtendFrameIntoClientArea 消除顶部白边 *)",
+      "Bash(git commit -m 'fix: 去掉 DWM API，改用 Margin 避开 1px 白边 *)",
+      "Bash(git commit -m 'fix: 用 AllowsTransparency 去掉 DWM 1px 白边 *)",
+      "Bash(git commit -m 'feat: 主窗体圆角 + 修复标题栏首次显示不全 *)",
+      "Bash(git commit -m 'fix: Window Background=Transparent 让圆角生效 *)",
+      "Bash(git commit -m 'fix: 最大化状态下拖拽标题栏可移动窗口 *)",
+      "Bash(git commit -m 'fix: 修正最大化拖拽时窗口跳动 *)",
+      "Bash(git commit -m 'fix: 启动时自适应屏幕大小，标题栏不再被裁掉 *)"
+    ]
+  }
+}

@@ -13,6 +13,7 @@ using LiveChartsCore;
 using LiveChartsCore.Defaults;
 using LiveChartsCore.SkiaSharpView;
 using LiveChartsCore.SkiaSharpView.Painting;
+using LiveChartsCore.SkiaSharpView.Painting.Effects;
 using LiveChartsCore.SkiaSharpView.VisualElements;
 using SkiaSharp;
 
@@ -205,6 +206,13 @@ public partial class MainViewModel : ObservableObject
 
     private LineSeries<double>? _p1Series;
     private LineSeries<double>? _p2Series;
+
+    // 趋势图参考线持久化：只建一次，之后仅更新 Y 值，避免每次刷新重建导致虚线样式丢失。
+    private RectangularSection? _trendUpperLimitSection;
+    private RectangularSection? _trendLowerLimitSection;
+    private RectangularSection? _trendSafetyUpperSection;
+    private RectangularSection? _trendSafetyLowerSection;
+    private RectangularSection? _trendMidpointSection;
 
     private const int CompensationHistoryLimit = 300;
     // 以自增索引作为 X 轴（第几次刷新计算），而非时间；仅追踪补偿值波动。
@@ -876,7 +884,50 @@ public partial class MainViewModel : ObservableObject
             }
         };
 
+        SetupTrendSections();
         SetupCompensationChart();
+    }
+
+    /// <summary>
+    /// 创建趋势图参考线（只执行一次）：
+    /// 规格上下限=绿色虚线，安全上下限=红色实线，目标中点=白色细线。
+    /// 之后每次刷新只更新各自的 Yi/Yj，避免重建导致虚线效果丢失或闪烁。
+    /// </summary>
+    private void SetupTrendSections()
+    {
+        RectangularSection MakeSection(SolidColorPaint stroke) => new()
+        {
+            Yi = 0,
+            Yj = 0,
+            Stroke = stroke,
+            Fill = null
+        };
+
+        _trendUpperLimitSection = MakeSection(new SolidColorPaint(new SKColor(102, 187, 106))
+        {
+            StrokeThickness = 1.5f,
+            PathEffect = new DashEffect(new float[] { 6, 4 })
+        });
+        _trendLowerLimitSection = MakeSection(new SolidColorPaint(new SKColor(102, 187, 106))
+        {
+            StrokeThickness = 1.5f,
+            PathEffect = new DashEffect(new float[] { 6, 4 })
+        });
+        _trendSafetyUpperSection = MakeSection(
+            new SolidColorPaint(new SKColor(239, 83, 80)) { StrokeThickness = 1.5f });
+        _trendSafetyLowerSection = MakeSection(
+            new SolidColorPaint(new SKColor(239, 83, 80)) { StrokeThickness = 1.5f });
+        _trendMidpointSection = MakeSection(
+            new SolidColorPaint(new SKColor(255, 255, 255, 60)) { StrokeThickness = 1 });
+
+        TrendSections = new[]
+        {
+            _trendUpperLimitSection,
+            _trendLowerLimitSection,
+            _trendSafetyUpperSection,
+            _trendSafetyLowerSection,
+            _trendMidpointSection
+        };
     }
 
     private void SetupCompensationChart()
@@ -891,6 +942,7 @@ public partial class MainViewModel : ObservableObject
                 Name = "铆压#1 补偿值",
                 Values = _headACompensationValues,
                 Stroke = new SolidColorPaint(headAColor) { StrokeThickness = 2 },
+                Fill = null,
                 GeometrySize = 5,
                 GeometryFill = new SolidColorPaint(headAColor),
                 GeometryStroke = null,
@@ -901,6 +953,7 @@ public partial class MainViewModel : ObservableObject
                 Name = "铆压#2 补偿值",
                 Values = _headBCompensationValues,
                 Stroke = new SolidColorPaint(headBColor) { StrokeThickness = 2 },
+                Fill = null,
                 GeometrySize = 5,
                 GeometryFill = new SolidColorPaint(headBColor),
                 GeometryStroke = null,
@@ -957,6 +1010,87 @@ public partial class MainViewModel : ObservableObject
             _headBCompensationValues.RemoveAt(0);
     }
 
+    /// <summary>
+    /// 刷新趋势图参考线的 Y 值（规格/安全上下限、目标中点），
+    /// 不重建 Section 实例，保证虚线与实线样式持久不丢失。
+    /// </summary>
+    private void UpdateTrendSectionValues()
+    {
+        var ctrl = Settings.Controller;
+
+        if (_trendUpperLimitSection != null)
+            _trendUpperLimitSection.Yi = _trendUpperLimitSection.Yj = ctrl.UpperLimit;
+        if (_trendLowerLimitSection != null)
+            _trendLowerLimitSection.Yi = _trendLowerLimitSection.Yj = ctrl.LowerLimit;
+        if (_trendSafetyUpperSection != null)
+            _trendSafetyUpperSection.Yi = _trendSafetyUpperSection.Yj = ctrl.SafetyUpperBound;
+        if (_trendSafetyLowerSection != null)
+            _trendSafetyLowerSection.Yi = _trendSafetyLowerSection.Yj = ctrl.SafetyLowerBound;
+        if (_trendMidpointSection != null)
+            _trendMidpointSection.Yi = _trendMidpointSection.Yj = Settings.TargetMidpoint;
+    }
+
+    /// <summary>
+    /// 计算趋势图 Y 轴范围：以安全带（安全上下限 + 少量余量）为核心固定视窗，
+    /// 只在安全带内按分位数扩展，彻底忽略落在安全带之外的异常值。
+    /// 这样 outlier 不会参与缩放，正常波动始终占满可视区，
+    /// 且安全带红线与规格带橙线都稳定可见。
+    /// </summary>
+    private (double Min, double Max) ComputeRobustTrendRange(List<double> values)
+    {
+        var ctrl = Settings.Controller;
+
+        // 核心视窗：安全带外扩一段余量，保证安全上下限红线不贴边、清晰可见。
+        // 余量取安全带宽度的 8%（至少 0.02mm），让红线稳定落在可视区内。
+        double safetySpan = ctrl.SafetyUpperBound - ctrl.SafetyLowerBound;
+        double margin = Math.Max(safetySpan * 0.08, 0.02);
+        double yMin = ctrl.SafetyLowerBound - margin;
+        double yMax = ctrl.SafetyUpperBound + margin;
+
+        if (values.Count > 0)
+        {
+            var sorted = values.OrderBy(v => v).ToList();
+
+            // 只看落在安全带内的点；安全带外即为真正的 outlier，不参与缩放。
+            var inSafety = sorted
+                .Where(v => v >= ctrl.SafetyLowerBound && v <= ctrl.SafetyUpperBound)
+                .ToList();
+            if (inSafety.Count == 0) inSafety = sorted;
+
+            // 用 2%/98% 分位数裁掉安全带内的零星极值，进一步防止拉伸。
+            double low = Percentile(inSafety, 0.02);
+            double high = Percentile(inSafety, 0.98);
+
+            // 允许数据在核心视窗基础上小幅外扩，但不会超出安全带硬裁剪。
+            yMin = Math.Min(yMin, low - 0.005);
+            yMax = Math.Max(yMax, high + 0.005);
+        }
+
+        // 最终硬性裁剪到安全带，杜绝任何异常点把轴撑开。
+        yMin = Math.Max(yMin, ctrl.SafetyLowerBound - margin);
+        yMax = Math.Min(yMax, ctrl.SafetyUpperBound + margin);
+
+        if (yMax - yMin < 0.01)
+        {
+            yMin -= 0.01;
+            yMax += 0.01;
+        }
+
+        return (yMin, yMax);
+    }
+
+    /// <summary>对已升序排列的数据做线性插值分位数（p 取 0~1）。</summary>
+    private static double Percentile(IReadOnlyList<double> sorted, double p)
+    {
+        if (sorted.Count == 1) return sorted[0];
+
+        double rank = p * (sorted.Count - 1);
+        int lowIndex = (int)Math.Floor(rank);
+        int highIndex = (int)Math.Ceiling(rank);
+        double fraction = rank - lowIndex;
+        return sorted[lowIndex] + (sorted[highIndex] - sorted[lowIndex]) * fraction;
+    }
+
     private void UpdateCharts(List<CrimpData> data)
     {
         var validData = data.Where(d => d.IsValid).ToList();
@@ -974,6 +1108,9 @@ public partial class MainViewModel : ObservableObject
             Name = "1高度 (铆压#1)",
             Values = p1Values,
             Stroke = new SolidColorPaint(new SKColor(66, 165, 245)) { StrokeThickness = 2.5f },
+            // 显式设为 null：否则 LiveCharts 每次重建会从主题调色板轮换一个半透明填充色，
+            // 导致线下空白区的颜色每次刷新都在变。
+            Fill = null,
             GeometryStroke = null,
             GeometryFill = null,
             GeometrySize = 0,
@@ -986,6 +1123,7 @@ public partial class MainViewModel : ObservableObject
             Name = "2高度 (铆压#2)",
             Values = p2Values,
             Stroke = new SolidColorPaint(new SKColor(255, 183, 77)) { StrokeThickness = 2.5f },
+            Fill = null,
             GeometryStroke = null,
             GeometryFill = null,
             GeometrySize = 0,
@@ -995,10 +1133,10 @@ public partial class MainViewModel : ObservableObject
 
         TrendSeries = new ISeries[] { _p1Series, _p2Series };
 
-        // Y轴范围
+        // Y轴范围 — 用稳健范围（忽略离群值），避免个别 outlier 把整个趋势压扁。
+        // 用户更关注规格带附近的正常波动，而非异常值。
         var allTrendValues = p1Values.Concat(p2Values).ToList();
-        double yMin = allTrendValues.Min() - 0.01;
-        double yMax = allTrendValues.Max() + 0.01;
+        var (yMin, yMax) = ComputeRobustTrendRange(allTrendValues);
 
         TrendYAxes = new[]
         {
@@ -1013,31 +1151,8 @@ public partial class MainViewModel : ObservableObject
             }
         };
 
-        // 参考线
-        TrendSections = new[]
-        {
-            new RectangularSection
-            {
-                Yi = Settings.Controller.UpperLimit,
-                Yj = Settings.Controller.UpperLimit,
-                Stroke = new SolidColorPaint(new SKColor(239, 83, 80, 100)) { StrokeThickness = 1 },
-                Fill = null
-            },
-            new RectangularSection
-            {
-                Yi = Settings.Controller.LowerLimit,
-                Yj = Settings.Controller.LowerLimit,
-                Stroke = new SolidColorPaint(new SKColor(102, 187, 106, 100)) { StrokeThickness = 1 },
-                Fill = null
-            },
-            new RectangularSection
-            {
-                Yi = Settings.TargetMidpoint,
-                Yj = Settings.TargetMidpoint,
-                Stroke = new SolidColorPaint(new SKColor(255, 255, 255, 60)) { StrokeThickness = 1 },
-                Fill = null
-            }
-        };
+        // 参考线：复用持久化的 Section 实例，只更新 Y 值，保持虚线/实线样式稳定不闪烁。
+        UpdateTrendSectionValues();
 
         // 分布直方图
         var allProductValues = new List<double>();
@@ -1102,6 +1217,7 @@ public partial class MainViewModel : ObservableObject
         };
 
         OnPropertyChanged(nameof(TrendSeries));
+        OnPropertyChanged(nameof(TrendYAxes));
         OnPropertyChanged(nameof(TrendSections));
         OnPropertyChanged(nameof(DistributionSeries));
         OnPropertyChanged(nameof(DistributionXAxes));

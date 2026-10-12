@@ -518,6 +518,7 @@
                                             XAxes="{Binding TrendXAxes}"
                                             YAxes="{Binding TrendYAxes}"
                                             Sections="{Binding TrendSections}"
+                                            ZoomMode="Both"
                                             LegendPosition="Hidden"
                                             TooltipPosition="Center"/>
 

@@ -24,6 +24,10 @@ public partial class MainViewModel : ObservableObject
     private readonly DecisionArbiter _headAArbiter = new();
     private readonly DecisionArbiter _headBArbiter = new();
     private readonly SettingsService _settingsService = new();
+    private readonly StopStateService _stopStateService = new();
+    // 已确认停机水位线（分压头）。持久化到 stop_state.json，重启后仍有效，
+    // 用于识别"又读到停机当时或更早的历史不良数据"并避免重复停机。
+    private StopState _stopState = new();
     private CsvDataProvider? _dataProvider;
     private IPlcAdapter? _plcAdapter;
     private IDisposable? _plcDisposable;
@@ -40,6 +44,7 @@ public partial class MainViewModel : ObservableObject
             settings.HasGlobalSKTypeface(SKTypeface.FromFamilyName("Microsoft YaHei")));
 
         Settings = _settingsService.Load();
+        _stopState = _stopStateService.Load();
         InitDataProvider();
         SetupTimer();
         SetupCharts();
@@ -380,18 +385,40 @@ public partial class MainViewModel : ObservableObject
 
             _lastAnalyzedDataTimestamp = currentDataTimestamp;
 
+            // 停机水位线闸门（分压头）：
+            // 若某压头本拍是"数据内容触发"的停机（Outlier/发散 Stop），
+            // 且当前窗口最新时间戳 <= 该压头已确认停机水位线，说明只是重启后
+            // 又读到停机当时或更早的历史不良数据，并非新生产的不良 → 判为历史回放，
+            // 跳过该压头的停机下发；出现晚于水位线的新数据时自动解除。
+            bool headAStaleStopReplay = IsStaleStopReplay(
+                headAResult.Decision, currentDataTimestamp, _stopState.HeadA);
+            bool headBStaleStopReplay = IsStaleStopReplay(
+                headBResult.Decision, currentDataTimestamp, _stopState.HeadB);
+
             // 收集告警 — Outlier/Stop 为报警，Drift 为需要关注的调整预警，均需在界面可见。
             var alerts = new List<string>();
             if (ShouldAlert(headAResult.Decision))
-                alerts.Add($"[铆压#1] {headAResult.Decision.Reason}");
+                alerts.Add(headAStaleStopReplay
+                    ? "[铆压#1] 检测到历史停机数据，等待新生产数据"
+                    : $"[铆压#1] {headAResult.Decision.Reason}");
             if (ShouldAlert(headBResult.Decision))
-                alerts.Add($"[铆压#2] {headBResult.Decision.Reason}");
+                alerts.Add(headBStaleStopReplay
+                    ? "[铆压#2] 检测到历史停机数据，等待新生产数据"
+                    : $"[铆压#2] {headBResult.Decision.Reason}");
 
-            // 发送 PLC 指令 — 停机优先于调整
+            // 发送 PLC 指令 — 停机优先于调整。历史回放的停机不下发到 PLC。
             await SendPlcCommandsAsync(
                 currentDataTimestamp,
                 headAResult.Decision,
-                headBResult.Decision);
+                headBResult.Decision,
+                headAStaleStopReplay,
+                headBStaleStopReplay);
+
+            // 新触发的内容停机（非历史回放）推进并持久化水位线。
+            UpdateStopWatermarks(
+                currentDataTimestamp,
+                headAResult.Decision, headAStaleStopReplay,
+                headBResult.Decision, headBStaleStopReplay);
 
             // 读取压头位置
             double? headAPosition = null;
@@ -529,22 +556,32 @@ public partial class MainViewModel : ObservableObject
     private async Task<(bool HeadASent, bool HeadBSent)> SendPlcCommandsAsync(
         DateTime? dataTimestamp,
         HeadDecision headADecision,
-        HeadDecision headBDecision)
+        HeadDecision headBDecision,
+        bool headAStaleStopReplay = false,
+        bool headBStaleStopReplay = false)
     {
         var plcAdapter = _plcAdapter;
         if (plcAdapter == null) return (false, false);
 
         PreparePlcCommandVersion(dataTimestamp);
 
-        if (headADecision.RequiresStop || headBDecision.RequiresStop)
+        // 历史回放的停机不计入"需要停机"，避免重启后读到旧不良再次下发停机。
+        bool headAStopEffective = headADecision.RequiresStop && !headAStaleStopReplay;
+        bool headBStopEffective = headBDecision.RequiresStop && !headBStaleStopReplay;
+
+        if (headAStopEffective || headBStopEffective)
         {
-            string stopKey = $"stop|{headADecision.RequiresStop}|{headBDecision.RequiresStop}";
-            string reason = headADecision.RequiresStop
+            string stopKey = $"stop|{headAStopEffective}|{headBStopEffective}";
+            string reason = headAStopEffective
                 ? headADecision.Reason
                 : headBDecision.Reason;
             await SendStopOnceAsync(dataTimestamp, stopKey, reason);
             return (false, false);
         }
+
+        // 两个压头都处于"历史回放停机"时，不下发调整，维持停机等待状态。
+        if (headADecision.RequiresStop || headBDecision.RequiresStop)
+            return (false, false);
 
         bool headASent = false;
         bool headBSent = false;
@@ -575,6 +612,55 @@ public partial class MainViewModel : ObservableObject
         }
 
         return (headASent, headBSent);
+    }
+
+    /// <summary>
+    /// 判断某压头本拍是否为"历史停机数据回放"：
+    /// 决策为内容触发停机（Outlier/发散 Stop），且该压头已有水位线，
+    /// 且当前窗口最新数据时间戳不晚于水位线（即没有晚于停机点的新数据）。
+    /// 时间戳缺失时保守处理为非回放（照常停机）。
+    /// </summary>
+    private static bool IsStaleStopReplay(
+        HeadDecision decision,
+        DateTime? currentDataTimestamp,
+        HeadStopState headStopState)
+    {
+        if (!decision.RequiresStop) return false;
+        if (!headStopState.LastStopDataTimestamp.HasValue) return false;
+        if (!currentDataTimestamp.HasValue) return false;
+
+        return currentDataTimestamp.Value <= headStopState.LastStopDataTimestamp.Value;
+    }
+
+    /// <summary>
+    /// 推进并持久化停机水位线：仅对"新触发、非历史回放"的内容停机更新。
+    /// 任一压头有更新即落盘一次。
+    /// </summary>
+    private void UpdateStopWatermarks(
+        DateTime? currentDataTimestamp,
+        HeadDecision headADecision, bool headAStaleStopReplay,
+        HeadDecision headBDecision, bool headBStaleStopReplay)
+    {
+        bool changed = false;
+
+        if (headADecision.RequiresStop && !headAStaleStopReplay && currentDataTimestamp.HasValue)
+        {
+            _stopState.HeadA.LastStopDataTimestamp = currentDataTimestamp;
+            _stopState.HeadA.Reason = headADecision.Reason;
+            _stopState.HeadA.RecordedAt = DateTime.Now;
+            changed = true;
+        }
+
+        if (headBDecision.RequiresStop && !headBStaleStopReplay && currentDataTimestamp.HasValue)
+        {
+            _stopState.HeadB.LastStopDataTimestamp = currentDataTimestamp;
+            _stopState.HeadB.Reason = headBDecision.Reason;
+            _stopState.HeadB.RecordedAt = DateTime.Now;
+            changed = true;
+        }
+
+        if (changed)
+            _stopStateService.Save(_stopState);
     }
 
     private async Task SendStopOnceAsync(

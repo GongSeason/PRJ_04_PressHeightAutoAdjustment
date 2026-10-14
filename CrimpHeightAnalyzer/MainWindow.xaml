@@ -549,9 +549,12 @@
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
 
-                            <TextBlock Grid.Row="0" Grid.ColumnSpan="2"
-                                       Text="补偿值波动 (理论值仅绘图；停机/稳定时不下发)"
-                                       FontSize="12" FontWeight="Bold" Foreground="#FFB0B0B0" Margin="0,0,0,8"/>
+                            <StackPanel Grid.Row="0" Grid.ColumnSpan="2" Margin="0,0,0,8">
+                                <TextBlock Text="补偿值波动 (理论值仅绘图；停机/稳定时不下发)"
+                                           FontSize="12" FontWeight="Bold" Foreground="#FFB0B0B0"/>
+                                <TextBlock Text="{Binding PerformanceText}" FontSize="9" Foreground="#FF80CBC4"
+                                           TextWrapping="Wrap" Margin="0,3,0,0"/>
+                            </StackPanel>
 
                             <lvc:CartesianChart Grid.Row="1" Grid.Column="0"
                                                 Series="{Binding CompensationSeries}"
@@ -758,8 +761,10 @@
 
         <!-- 加载遮罩 -->
         <Border Grid.Row="1" Background="#CC000000" Visibility="{Binding IsLoading, Converter={StaticResource BoolToVis}}">
-            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="560">
                 <TextBlock Text="正在加载..." Foreground="#FFFAFAFA" FontSize="18" HorizontalAlignment="Center"/>
+                <TextBlock Text="{Binding PerformanceText}" Foreground="#FF80CBC4" FontSize="12"
+                           TextWrapping="Wrap" TextAlignment="Center" Margin="0,10,0,0"/>
             </StackPanel>
         </Border>
     </Grid>

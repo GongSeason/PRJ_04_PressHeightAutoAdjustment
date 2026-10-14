@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Threading;
@@ -66,6 +67,9 @@ public partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     private bool isLoading;
+
+    [ObservableProperty]
+    private string performanceText = "等待首次刷新";
 
     #endregion
 
@@ -335,13 +339,27 @@ public partial class MainViewModel : ObservableObject
 
         IsLoading = true;
         StatusText = "正在加载数据...";
+        PerformanceText = "开始刷新…";
+        var totalTimer = Stopwatch.StartNew();
+        string currentPhase = "配置校验";
+        var progressTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        progressTimer.Tick += (_, _) =>
+            PerformanceText = $"阶段：{currentPhase} | 本次刷新已耗时 {totalTimer.Elapsed.TotalSeconds:F1} 秒";
+        progressTimer.Start();
+        long csvMs = 0, analysisMs = 0, controlMs = 0, uiMs = 0;
 
         try
         {
             ValidateSettings();
 
+            currentPhase = "CSV扫描/读取";
+            PerformanceText = "正在扫描并读取 CSV…";
+            var csvTimer = Stopwatch.StartNew();
             var data = await _dataProvider.GetLatestDataAsync(Settings.Controller.WindowSize);
+            csvTimer.Stop();
+            csvMs = csvTimer.ElapsedMilliseconds;
             _currentData = data;
+            PerformanceText = $"CSV {csvMs} ms | 读取 {data.Count} 条";
 
             if (_currentData.Count == 0 || !_currentData.Any(d => d.IsValid))
             {
@@ -365,12 +383,18 @@ public partial class MainViewModel : ObservableObject
                     StatusText = "未找到数据";
                 }
 
+                progressTimer.Stop();
+                totalTimer.Stop();
+                PerformanceText = $"CSV {csvMs} ms | 无有效数据 | 总计 {totalTimer.ElapsedMilliseconds} ms";
                 IsLoading = false;
                 return;
             }
 
             _dataUnavailableSince = null;
 
+            currentPhase = "数据分析/决策";
+            PerformanceText = $"CSV {csvMs} ms | 正在分析 {_currentData.Count} 条…";
+            var analysisTimer = Stopwatch.StartNew();
             DateTime? currentDataTimestamp = _dataProvider.LastDataTimestamp;
             bool advanceDriftCycle = currentDataTimestamp.HasValue
                 && currentDataTimestamp != _lastAnalyzedDataTimestamp;
@@ -394,6 +418,9 @@ public partial class MainViewModel : ObservableObject
                 headAResult.Decision, currentDataTimestamp, _stopState.HeadA);
             bool headBStaleStopReplay = IsStaleStopReplay(
                 headBResult.Decision, currentDataTimestamp, _stopState.HeadB);
+            analysisTimer.Stop();
+            analysisMs = analysisTimer.ElapsedMilliseconds;
+            PerformanceText = $"CSV {csvMs} ms | 分析 {analysisMs} ms | 正在更新状态/图表…";
 
             // 收集告警 — Outlier/Stop 为报警，Drift 为需要关注的调整预警，均需在界面可见。
             var alerts = new List<string>();
@@ -407,6 +434,8 @@ public partial class MainViewModel : ObservableObject
                     : $"[铆压#2] {headBResult.Decision.Reason}");
 
             // 发送 PLC 指令 — 停机优先于调整。历史回放的停机不下发到 PLC。
+            currentPhase = "控制/位置读取（当前模拟模式应很快）";
+            var controlTimer = Stopwatch.StartNew();
             await SendPlcCommandsAsync(
                 currentDataTimestamp,
                 headAResult.Decision,
@@ -429,7 +458,13 @@ public partial class MainViewModel : ObservableObject
                 headBPosition = await _plcAdapter.ReadHeadPositionAsync(1);
             }
 
+            controlTimer.Stop();
+            controlMs = controlTimer.ElapsedMilliseconds;
+            PerformanceText = $"CSV {csvMs} ms | 分析 {analysisMs} ms | 控制/状态读取 {controlMs} ms | 更新图表…";
+
+            currentPhase = "UI/图表更新";
             // 更新UI
+            var uiTimer = Stopwatch.StartNew();
             Application.Current.Dispatcher.Invoke(() =>
             {
                 UpdateHeadAResults(headAResult);
@@ -443,9 +478,17 @@ public partial class MainViewModel : ObservableObject
                 StatusText = $"数据加载完成 - {_currentData.Count}条记录";
                 IsLoading = false;
             });
+            uiTimer.Stop();
+            uiMs = uiTimer.ElapsedMilliseconds;
+            progressTimer.Stop();
+            totalTimer.Stop();
+            PerformanceText = $"CSV {csvMs} ms | 分析 {analysisMs} ms | 控制/状态 {controlMs} ms | UI/图表 {uiMs} ms | 总计 {totalTimer.ElapsedMilliseconds} ms | {data.Count} 条";
         }
         catch (Exception ex)
         {
+            progressTimer.Stop();
+            totalTimer.Stop();
+            PerformanceText = $"刷新失败 | 已耗时 {totalTimer.ElapsedMilliseconds} ms | {ex.Message}";
             StatusText = $"加载失败: {ex.Message}";
             IsLoading = false;
         }

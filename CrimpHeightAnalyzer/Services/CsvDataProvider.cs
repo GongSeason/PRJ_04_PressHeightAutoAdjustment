@@ -49,12 +49,44 @@ public class CsvDataProvider : IDataProvider
             return null;
 
         var cutoff = _scanDays > 0 ? DateTime.Today.AddDays(-_scanDays) : DateTime.MinValue;
-        return Directory.GetFiles(_basePath, "*.csv", SearchOption.TopDirectoryOnly)
+        // 递归搜索所有子目录：实际 CSV 位于 <监视根目录>\<日期文件夹>\Data_*_<日期>.csv，
+        // 而不在监视根目录本层。日期文件夹之上还可能存在额外父级（如 F2 的上级），
+        // AllDirectories 可一并覆盖，无需关心具体层数。
+        return EnumerateCsvFilesSafe(_basePath)
             .Where(file => TryGetFileDate(file, out var date) && date >= cutoff)
             .OrderByDescending(GetFileDateSafe)
             .ThenByDescending(GetLastWriteTimeUtcSafe)
             .ThenByDescending(f => f, StringComparer.OrdinalIgnoreCase)
             .FirstOrDefault();
+    }
+
+    /// <summary>
+    /// 递归枚举监视根目录下的所有 CSV 文件。
+    /// 使用逐项枚举以便忽略个别无法访问的子目录（权限/被占用），不让整次扫描失败。
+    /// </summary>
+    private static IEnumerable<string> EnumerateCsvFilesSafe(string basePath)
+    {
+        var options = new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            IgnoreInaccessible = true,
+            // 不要跳过 ReparsePoint：OneDrive / 云盘“按需同步”会把日期子文件夹标记为
+            // ReparsePoint，若跳过会导致递归无法进入这些目录、扫不到任何 CSV
+            // （现象：MonitorPath 指到 F2 根目录时没有数据，直接指到当天日期文件夹才有）。
+            // 仅跳过隐藏/系统目录；数据目录为普通目录树，不存在符号链接环的风险。
+            AttributesToSkip = FileAttributes.Hidden | FileAttributes.System,
+            MaxRecursionDepth = 8
+        };
+
+        try
+        {
+            return Directory.EnumerateFiles(basePath, "*.csv", options);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[CSV] 枚举文件失败 {basePath}: {ex.Message}");
+            return Enumerable.Empty<string>();
+        }
     }
 
     /// <summary>

@@ -49,45 +49,116 @@ public class CsvDataProvider : IDataProvider
             return null;
 
         var cutoff = _scanDays > 0 ? DateTime.Today.AddDays(-_scanDays) : DateTime.MinValue;
-        // 递归搜索所有子目录：实际 CSV 位于 <监视根目录>\<日期文件夹>\Data_*_<日期>.csv，
-        // 而不在监视根目录本层。日期文件夹之上还可能存在额外父级（如 F2 的上级），
-        // AllDirectories 可一并覆盖，无需关心具体层数。
-        return EnumerateCsvFilesSafe(_basePath)
-            .Where(file => TryGetFileDate(file, out var date) && date >= cutoff)
-            .OrderByDescending(GetFileDateSafe)
-            .ThenByDescending(GetLastWriteTimeUtcSafe)
-            .ThenByDescending(f => f, StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault();
+
+        // 目录结构固定为 <监视根目录>\<yyyyMMdd 日期文件夹>\Data_*_<日期>.csv，
+        // 且日期文件夹里混有上万张 NG 图片。为避免每次刷新都遍历海量图片
+        // （尤其在 OneDrive 占位目录下会触发云端水合，极慢），
+        // 这里不再全树递归枚举所有 CSV，而是：
+        //   1. 只枚举“日期文件夹”本身（目录项数量极少，不碰图片）；
+        //   2. 按文件夹名（yyyyMMdd）直接选出最新一天；
+        //   3. 仅在该日期文件夹本层查找当天的 CSV。
+        var latestDateDir = FindLatestDateDirectory(_basePath, cutoff);
+        if (latestDateDir == null)
+            return null;
+
+        return FindCsvInDirectory(latestDateDir);
     }
 
     /// <summary>
-    /// 递归枚举监视根目录下的所有 CSV 文件。
-    /// 使用逐项枚举以便忽略个别无法访问的子目录（权限/被占用），不让整次扫描失败。
+    /// 在 <paramref name="basePath"/> 下查找名称为 yyyyMMdd、日期 ≥ cutoff 的最新日期文件夹。
+    /// 仅枚举目录项（不触碰图片等文件）。为兼容“F2 之上可能新增父级目录”的情况，
+    /// 若本层没有任何日期文件夹，则下探一层再找（最多两层，仍不做全树递归，避免遍历图片）。
     /// </summary>
-    private static IEnumerable<string> EnumerateCsvFilesSafe(string basePath)
+    private static string? FindLatestDateDirectory(string basePath, DateTime cutoff)
+    {
+        var latest = SelectLatestDateDir(EnumerateDirectoriesSafe(basePath), cutoff);
+        if (latest != null)
+            return latest;
+
+        // 本层未命中：逐个下探一层子目录（如 <根>\F2\<日期>），仍只枚举目录。
+        foreach (var sub in EnumerateDirectoriesSafe(basePath))
+        {
+            var hit = SelectLatestDateDir(EnumerateDirectoriesSafe(sub), cutoff);
+            if (hit != null)
+                return hit;
+        }
+
+        return null;
+    }
+
+    private static string? SelectLatestDateDir(IEnumerable<string> directories, DateTime cutoff) =>
+        directories
+            .Where(dir => TryParseDirDate(dir, out var date) && date >= cutoff)
+            .OrderByDescending(GetDirDateSafe)
+            .FirstOrDefault();
+
+    /// <summary>
+    /// 仅在指定日期文件夹本层查找 CSV（通常只有一个 Data_*_&lt;日期&gt;.csv）。
+    /// 若存在多个，取文件名日期最新、再按写入时间兜底。只列单层目录，开销很小。
+    /// </summary>
+    private static string? FindCsvInDirectory(string directory)
     {
         var options = new EnumerationOptions
         {
-            RecurseSubdirectories = true,
+            RecurseSubdirectories = false,
             IgnoreInaccessible = true,
-            // 不要跳过 ReparsePoint：OneDrive / 云盘“按需同步”会把日期子文件夹标记为
-            // ReparsePoint，若跳过会导致递归无法进入这些目录、扫不到任何 CSV
-            // （现象：MonitorPath 指到 F2 根目录时没有数据，直接指到当天日期文件夹才有）。
-            // 仅跳过隐藏/系统目录；数据目录为普通目录树，不存在符号链接环的风险。
-            AttributesToSkip = FileAttributes.Hidden | FileAttributes.System,
-            MaxRecursionDepth = 8
+            AttributesToSkip = FileAttributes.Hidden | FileAttributes.System
         };
 
         try
         {
-            return Directory.EnumerateFiles(basePath, "*.csv", options);
+            return Directory.EnumerateFiles(directory, "*.csv", options)
+                .OrderByDescending(GetFileDateSafe)
+                .ThenByDescending(GetLastWriteTimeUtcSafe)
+                .ThenByDescending(f => f, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[CSV] 枚举文件失败 {basePath}: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[CSV] 枚举 CSV 失败 {directory}: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 枚举单层子目录，忽略无法访问的项，不让整次扫描失败。不递归、不触碰文件。
+    /// </summary>
+    private static IEnumerable<string> EnumerateDirectoriesSafe(string path)
+    {
+        var options = new EnumerationOptions
+        {
+            RecurseSubdirectories = false,
+            IgnoreInaccessible = true,
+            AttributesToSkip = FileAttributes.Hidden | FileAttributes.System
+        };
+
+        try
+        {
+            return Directory.EnumerateDirectories(path, "*", options);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[CSV] 枚举目录失败 {path}: {ex.Message}");
             return Enumerable.Empty<string>();
         }
     }
+
+    /// <summary>
+    /// 解析日期文件夹名（yyyyMMdd）。文件夹名即日期，不含前缀。
+    /// </summary>
+    private static bool TryParseDirDate(string dirPath, out DateTime date)
+    {
+        string name = Path.GetFileName(dirPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        return DateTime.TryParseExact(
+            name,
+            "yyyyMMdd",
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.None,
+            out date);
+    }
+
+    private static DateTime GetDirDateSafe(string dirPath) =>
+        TryParseDirDate(dirPath, out var date) ? date : DateTime.MinValue;
 
     /// <summary>
     /// 从文件末尾向前读取，跳过表头、空行和未写完整的末行，

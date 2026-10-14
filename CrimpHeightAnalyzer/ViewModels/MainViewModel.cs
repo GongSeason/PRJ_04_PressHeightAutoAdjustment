@@ -359,7 +359,7 @@ public partial class MainViewModel : ObservableObject
             csvTimer.Stop();
             csvMs = csvTimer.ElapsedMilliseconds;
             _currentData = data;
-            PerformanceText = $"CSV {csvMs} ms | 读取 {data.Count} 条";
+            PerformanceText = $"CSV {csvMs} ms | {_dataProvider.LastReadDiagnostics} | 读取 {data.Count} 条";
 
             if (_currentData.Count == 0 || !_currentData.Any(d => d.IsValid))
             {
@@ -385,7 +385,7 @@ public partial class MainViewModel : ObservableObject
 
                 progressTimer.Stop();
                 totalTimer.Stop();
-                PerformanceText = $"CSV {csvMs} ms | 无有效数据 | 总计 {totalTimer.ElapsedMilliseconds} ms";
+                PerformanceText = $"CSV {csvMs} ms | {_dataProvider.LastReadDiagnostics} | 无有效数据 | 总计 {totalTimer.ElapsedMilliseconds} ms";
                 IsLoading = false;
                 return;
             }
@@ -482,7 +482,7 @@ public partial class MainViewModel : ObservableObject
             uiMs = uiTimer.ElapsedMilliseconds;
             progressTimer.Stop();
             totalTimer.Stop();
-            PerformanceText = $"CSV {csvMs} ms | 分析 {analysisMs} ms | 控制/状态 {controlMs} ms | UI/图表 {uiMs} ms | 总计 {totalTimer.ElapsedMilliseconds} ms | {data.Count} 条";
+            PerformanceText = $"CSV {csvMs} ms ({_dataProvider.LastReadDiagnostics}) | 分析 {analysisMs} ms | 控制/状态 {controlMs} ms | UI/图表 {uiMs} ms | 总计 {totalTimer.ElapsedMilliseconds} ms | {data.Count} 条";
         }
         catch (Exception ex)
         {

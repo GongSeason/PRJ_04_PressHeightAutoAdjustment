@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using CrimpHeight.Core.Interfaces;
@@ -15,6 +16,7 @@ public class CsvDataProvider : IDataProvider
     private readonly int _scanDays;
 
     public DateTime? LastDataTimestamp { get; private set; }
+    public string LastReadDiagnostics { get; private set; } = "尚未读取";
 
     public CsvDataProvider(string basePath, int scanDays = 0)
     {
@@ -32,10 +34,27 @@ public class CsvDataProvider : IDataProvider
             cancellationToken.ThrowIfCancellationRequested();
 
             // 仅选取最新一个 CSV；记录不足时只用已有记录，不再回退到旧文件。
+            var locateTimer = Stopwatch.StartNew();
             var latestFile = GetLatestCsvFile();
+            locateTimer.Stop();
+
+            long fileLength = 0;
+            if (latestFile != null)
+            {
+                try { fileLength = new FileInfo(latestFile).Length; }
+                catch { /* 文件可能正被轮转；诊断信息允许长度未知。 */ }
+            }
+
+            long bytesRead = 0;
+            var readTimer = Stopwatch.StartNew();
             var allData = latestFile != null
-                ? ParseFileFromEnd(latestFile, count, cancellationToken)
+                ? ParseFileFromEnd(latestFile, count, cancellationToken, out bytesRead)
                 : new List<CrimpData>();
+            readTimer.Stop();
+
+            LastReadDiagnostics = latestFile == null
+                ? $"定位 {locateTimer.ElapsedMilliseconds} ms | 未找到 CSV"
+                : $"定位 {locateTimer.ElapsedMilliseconds} ms | 尾读/解析 {readTimer.ElapsedMilliseconds} ms | 文件 {fileLength / 1024.0 / 1024.0:F1} MB | 实读 {bytesRead / 1024.0:F1} KB | {Path.GetFileName(latestFile)}";
 
             LastDataTimestamp = allData.Count > 0 ? allData[^1].RecordedAt : null;
 
@@ -167,8 +186,10 @@ public class CsvDataProvider : IDataProvider
     private static List<CrimpData> ParseFileFromEnd(
         string filePath,
         int maxCount,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        out long bytesRead)
     {
+        bytesRead = 0;
         // 倒序收集：集满 maxCount 即停止；末尾为最新，稍后整体反转成正序。
         var reversed = new List<CrimpData>(maxCount);
 
@@ -186,7 +207,7 @@ public class CsvDataProvider : IDataProvider
             // 末尾偶发的无效行（高度=0 的预热段等）。只读末尾这么多行即停，
             // 不再读到文件头，使单次开销与文件总大小（可达数十万行）解耦。
             const int tailBuffer = 16;
-            var lines = ReadLinesFromEnd(fileStream, maxCount + tailBuffer, cancellationToken);
+            var lines = ReadLinesFromEnd(fileStream, maxCount + tailBuffer, cancellationToken, out bytesRead);
 
             // 末行若未以换行结束，视为正在写入的半条记录，丢弃不解析。
             if (lines.Count > 0 && !EndsWithLineTerminator(fileStream))
@@ -233,8 +254,10 @@ public class CsvDataProvider : IDataProvider
     private static List<string> ReadLinesFromEnd(
         FileStream fileStream,
         int maxLines,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        out long bytesRead)
     {
+        bytesRead = 0;
         var lines = new List<string>();
         if (maxLines <= 0) return lines;
 
@@ -256,6 +279,7 @@ public class CsvDataProvider : IDataProvider
             position -= readSize;
             fileStream.Seek(position, SeekOrigin.Begin);
             ReadExactly(fileStream, buffer, readSize);
+            bytesRead += readSize;
 
             for (int i = readSize - 1; i >= 0; i--)
             {

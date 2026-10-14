@@ -182,7 +182,11 @@ public class CsvDataProvider : IDataProvider
                 FileShare.ReadWrite  // 关键：允许其他进程写入
             );
 
-            var lines = ReadLinesFromEnd(fileStream, cancellationToken);
+            // 倒读上限 = 所需条数 + 缓冲。缓冲用于吸收：可能被丢弃的半截末行、
+            // 末尾偶发的无效行（高度=0 的预热段等）。只读末尾这么多行即停，
+            // 不再读到文件头，使单次开销与文件总大小（可达数十万行）解耦。
+            const int tailBuffer = 16;
+            var lines = ReadLinesFromEnd(fileStream, maxCount + tailBuffer, cancellationToken);
 
             // 末行若未以换行结束，视为正在写入的半条记录，丢弃不解析。
             if (lines.Count > 0 && !EndsWithLineTerminator(fileStream))
@@ -223,21 +227,28 @@ public class CsvDataProvider : IDataProvider
     /// <summary>
     /// 从文件末尾向前逐行读取，返回从新到旧排列的行（第 0 项为物理末行）。
     /// 表头（文件首行）不会包含在返回结果中。
+    /// 收集到 <paramref name="maxLines"/> 行后立即停止，不再向文件头继续读取，
+    /// 使单次读取开销与文件总大小无关（文件可增长到数十万行）。
     /// </summary>
     private static List<string> ReadLinesFromEnd(
         FileStream fileStream,
+        int maxLines,
         CancellationToken cancellationToken)
     {
         var lines = new List<string>();
+        if (maxLines <= 0) return lines;
+
         long length = fileStream.Length;
         if (length == 0) return lines;
 
         const int bufferSize = 8192;
         var buffer = new byte[bufferSize];
         long position = length;
-        var pending = new List<byte>(); // 跨块缓存当前（尚未遇到换行符的）行字节，正序存放。
+        // 跨块缓存当前（尚未遇到换行符的）行字节。倒读时字节是逆序出现的，
+        // 故放入时追加（逆序），凑成整行后一次性反转再解码，避免逐字节头插的 O(n²) 开销。
+        var pending = new List<byte>();
 
-        while (position > 0)
+        while (position > 0 && lines.Count < maxLines)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -251,18 +262,35 @@ public class CsvDataProvider : IDataProvider
                 byte b = buffer[i];
                 if (b == (byte)'\n')
                 {
-                    lines.Add(DecodeLine(pending));
+                    lines.Add(DecodeReversed(pending));
                     pending.Clear();
+                    if (lines.Count >= maxLines)
+                        break; // 已集满所需行数，停止扫描本块并退出外层循环。
                 }
                 else if (b != (byte)'\r')
                 {
-                    pending.Insert(0, b);
+                    pending.Add(b); // 逆序追加（O(1)），整行完成后统一反转。
                 }
             }
         }
 
-        // 文件首行即表头：剩余 pending 不加入结果，直接丢弃以跳过表头。
+        // 文件首行即表头：仅当确实读到了文件开头（position == 0）时，
+        // 剩余 pending 才是表头，直接丢弃。若因集满 maxLines 提前停止，
+        // pending 是一条更旧记录的残片，同样丢弃（不足一整行，不解析）。
         return lines;
+    }
+
+    /// <summary>
+    /// 将“逆序存放”的行字节反转为正序后用 UTF-8 解码。
+    /// </summary>
+    private static string DecodeReversed(List<byte> reversedBytes)
+    {
+        if (reversedBytes.Count == 0) return string.Empty;
+        var bytes = new byte[reversedBytes.Count];
+        int n = reversedBytes.Count;
+        for (int i = 0; i < n; i++)
+            bytes[i] = reversedBytes[n - 1 - i];
+        return System.Text.Encoding.UTF8.GetString(bytes);
     }
 
     private static void ReadExactly(FileStream fileStream, byte[] buffer, int count)
@@ -276,9 +304,6 @@ public class CsvDataProvider : IDataProvider
             offset += read;
         }
     }
-
-    private static string DecodeLine(List<byte> bytes) =>
-        bytes.Count == 0 ? string.Empty : System.Text.Encoding.UTF8.GetString(bytes.ToArray());
 
     private static CrimpData? ParseLine(string line, string filePath)
     {

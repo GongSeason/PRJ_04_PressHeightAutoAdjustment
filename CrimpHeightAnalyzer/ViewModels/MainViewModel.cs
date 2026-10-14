@@ -437,8 +437,8 @@ public partial class MainViewModel : ObservableObject
                 UpdateAlerts(alerts);
                 UpdateCharts(_currentData);
                 AppendCompensationPoint(
-                    headAResult.Decision.AdjustmentDelta,
-                    headBResult.Decision.AdjustmentDelta);
+                    GetCompensationChartValue(headAResult),
+                    GetCompensationChartValue(headBResult));
                 UpdateHeadPositions(headAPosition, headBPosition);
                 StatusText = $"数据加载完成 - {_currentData.Count}条记录";
                 IsLoading = false;
@@ -1067,7 +1067,10 @@ public partial class MainViewModel : ObservableObject
                 Name = "补偿值 (mm)",
                 NamePaint = new SolidColorPaint(new SKColor(176, 176, 176)),
                 LabelsPaint = new SolidColorPaint(new SKColor(117, 117, 117)),
-                SeparatorsPaint = new SolidColorPaint(new SKColor(42, 42, 42))
+                SeparatorsPaint = new SolidColorPaint(new SKColor(42, 42, 42)),
+                // PLC 写入分辨率为 1e-5 mm；默认格式会把微小补偿刻度舍入成 0。
+                Labeler = value => value.ToString("F5"),
+                MinStep = 0.00001
             }
         };
 
@@ -1084,6 +1087,29 @@ public partial class MainViewModel : ObservableObject
         };
     }
 
+    /// <summary>
+    /// 返回补偿图表的理论值，不代表 PLC 实际下发值。
+    /// 仅在 WarmUp（样本不足）时显示决策值；其余有分析结果的状态，
+    /// 按偏差 × 增益计算并限幅，使 Stable/停机状态也能显示有意义的候选补偿值。
+    /// PLC 下发仍由 SendPlcCommandsAsync 根据决策状态控制。
+    /// </summary>
+    private double GetCompensationChartValue(HeadAnalysisResult result)
+    {
+        if (result.Decision.State == HeadState.WarmUp)
+            return result.Decision.AdjustmentDelta;
+
+        // Drift 实际动作使用仲裁结果（包含降 K 等控制策略）；停机/稳定才显示理论候选值。
+        if (result.Decision.RequiresAction)
+            return result.Decision.AdjustmentDelta;
+
+        double theoreticalDelta = result.Deviation * Settings.Controller.ControllerGain;
+        return double.IsFinite(theoreticalDelta)
+            ? Math.Clamp(theoreticalDelta,
+                -Settings.Controller.MaxStepPerAdjust,
+                Settings.Controller.MaxStepPerAdjust)
+            : 0;
+    }
+
     private void AppendCompensationPoint(double headAValue, double headBValue)
     {
         double x = ++_compensationIndex;
@@ -1094,6 +1120,34 @@ public partial class MainViewModel : ObservableObject
             _headACompensationValues.RemoveAt(0);
         while (_headBCompensationValues.Count > CompensationHistoryLimit)
             _headBCompensationValues.RemoveAt(0);
+
+        UpdateCompensationAxisRange();
+    }
+
+    /// <summary>
+    /// 根据当前补偿值历史动态缩放纵轴，避免 Stable 状态下的微小非零理论补偿
+    /// 因为量级较小而视觉上贴近 0 轴。
+    /// </summary>
+    private void UpdateCompensationAxisRange()
+    {
+        if (CompensationYAxes.Length == 0) return;
+
+        var values = _headACompensationValues
+            .Concat(_headBCompensationValues)
+            .Select(point => point.Y)
+            .Where(value => value.HasValue && double.IsFinite(value.Value))
+            .Select(value => value!.Value)
+            .ToList();
+
+        double min = values.Count == 0 ? 0 : values.Min();
+        double max = values.Count == 0 ? 0 : values.Max();
+        double range = max - min;
+        double magnitude = Math.Max(Math.Abs(min), Math.Abs(max));
+        double padding = Math.Max(range * 0.1, magnitude * 0.1);
+        if (padding < 0.00001) padding = 0.00001;
+
+        CompensationYAxes[0].MinLimit = min - padding;
+        CompensationYAxes[0].MaxLimit = max + padding;
     }
 
     /// <summary>

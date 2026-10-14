@@ -550,7 +550,7 @@
                             </Grid.ColumnDefinitions>
 
                             <TextBlock Grid.Row="0" Grid.ColumnSpan="2"
-                                       Text="PLC 补偿值波动 (每次刷新计算的下发值)"
+                                       Text="补偿值波动 (理论值仅绘图；停机/稳定时不下发)"
                                        FontSize="12" FontWeight="Bold" Foreground="#FFB0B0B0" Margin="0,0,0,8"/>
 
                             <lvc:CartesianChart Grid.Row="1" Grid.Column="0"

@@ -22,10 +22,6 @@ public class HeadDecision
 
     /// <summary>是否需要 PLC 调整动作（非零调整量）</summary>
     public bool RequiresAction => State == HeadState.Drift && Math.Abs(AdjustmentDelta) > 1e-10;
-
-    /// <summary>是否需要停机报警</summary>
-    public bool RequiresStop => State == HeadState.Outlier
-        || (State == HeadState.Drift && DivergenceLevel == DivergenceLevel.Stop);
 }
 
 /// <summary>

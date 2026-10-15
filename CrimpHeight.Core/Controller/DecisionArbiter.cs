@@ -1,5 +1,4 @@
 using CrimpHeight.Core.Models;
-using CrimpHeight.Core.Safety;
 using CrimpHeight.Core.Statistics;
 
 namespace CrimpHeight.Core.Controller;
@@ -14,7 +13,6 @@ public class DecisionArbiter
     private readonly R2RController _r2r = new();
     private readonly DivergenceGrader _divGrader = new();
     private readonly DriftDetector _driftDetector = new();
-    private readonly SafetyGuard _safetyGuard = new();
 
     /// <summary>
     /// 对单个压头的一路高度序列执行统计与控制决策，不进行产品间发散比较。
@@ -33,31 +31,6 @@ public class DecisionArbiter
         result.Product1 = CalculateStats(headName, validValues, config.TrimPercentage);
         result.CombinedTrimmedMean = result.Product1.TrimmedMean;
         result.Deviation = result.CombinedTrimmedMean - config.TargetMidpoint;
-
-        if (validValues.Count == 0)
-        {
-            result.Decision = new HeadDecision
-            {
-                State = HeadState.WarmUp,
-                DivergenceLevel = DivergenceLevel.Normal,
-                Reason = $"[置信不足] 样本 0 < 最低要求 {config.MinSamplesPerEpoch}"
-            };
-            return result;
-        }
-
-        double sigma = TrimmedMeanCalculator.CalculateStdDev(validValues);
-        var (safetyTriggered, safetyReason) = _safetyGuard.Check(
-            result.CombinedTrimmedMean, sigma, lastDataTimestamp, config);
-        if (safetyTriggered)
-        {
-            result.Decision = new HeadDecision
-            {
-                State = HeadState.Outlier,
-                DivergenceLevel = DivergenceLevel.Normal,
-                Reason = $"[安全护栏] {safetyReason}"
-            };
-            return result;
-        }
 
         if (validValues.Count < config.MinSamplesPerEpoch)
         {
@@ -87,11 +60,9 @@ public class DecisionArbiter
                 Direction = R2RController.GetDirection(delta),
                 Reason = $"[调整] {(outOfBounds ? "偏差越界" : "DriftScore 确认")}，Δ={delta:F5}mm"
             };
-            _safetyGuard.UpdateBaselineSigma(sigma);
             return result;
         }
 
-        _safetyGuard.UpdateBaselineSigma(sigma);
         result.Decision = new HeadDecision
         {
             State = HeadState.Stable,
@@ -169,27 +140,9 @@ public class DecisionArbiter
             result.Product1.TrimmedMean, result.Product2.TrimmedMean, config);
         result.DivergenceD = d;
 
-        double currentSigma = TrimmedMeanCalculator.CalculateStdDev(combined);
+        // ===== 仲裁流程 =====
 
-        // ===== PRD §A 五级优先级仲裁 =====
-
-        // 1. 安全护栏（最高优先级）
-        var (safetyTriggered, safetyReason) = _safetyGuard.Check(
-            result.CombinedTrimmedMean, currentSigma, lastDataTimestamp, config);
-        if (safetyTriggered)
-        {
-            result.Decision = new HeadDecision
-            {
-                State = HeadState.Outlier,
-                DivergenceLevel = divLevel,
-                AdjustmentDelta = 0,
-                Direction = AdjustmentDirection.None,
-                Reason = $"[安全护栏] {safetyReason}"
-            };
-            return result;
-        }
-
-        // 2. 置信不足
+        // 1. 置信不足
         if (validCount < config.MinSamplesPerEpoch)
         {
             result.Decision = new HeadDecision
@@ -203,7 +156,7 @@ public class DecisionArbiter
             return result;
         }
 
-        // 3. 发散严重（Stop）
+        // 2. 发散严重（Stop）
         if (divLevel == DivergenceLevel.Stop)
         {
             result.Decision = new HeadDecision
@@ -217,7 +170,7 @@ public class DecisionArbiter
             return result;
         }
 
-        // 4. 触发动作（越界或 DriftScore 确认）
+        // 3. 触发动作（越界或 DriftScore 确认）
         bool outOfBounds = result.Deviation > config.UpperTolerance
                         || result.Deviation < -config.LowerTolerance;
 
@@ -252,14 +205,10 @@ public class DecisionArbiter
                 Reason = $"[调整] {reasonDetail}{degradedTag}，Δ={delta:F5}mm"
             };
 
-            // 更新 σ 基线
-            _safetyGuard.UpdateBaselineSigma(currentSigma);
-
             return result;
         }
 
-        // 5. 稳定
-        _safetyGuard.UpdateBaselineSigma(currentSigma);
+        // 4. 稳定
         result.Decision = new HeadDecision
         {
             State = HeadState.Stable,
@@ -278,7 +227,6 @@ public class DecisionArbiter
     public void Reset()
     {
         _driftDetector.Reset();
-        _safetyGuard.ResetBaseline();
     }
 
     private static ProductStats CalculateStats(string name, IReadOnlyList<double> values, double trimPercentage)

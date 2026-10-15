@@ -144,8 +144,9 @@
                            Foreground="#FFFAFAFA" VerticalAlignment="Center" HorizontalAlignment="Center"/>
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
-                    <Button Content="刷新" Command="{Binding RefreshDataCommand}"
-                            Style="{StaticResource IndustrialButton}" Margin="0,0,8,0" Padding="12,5" FontSize="12"/>
+                    <Button Content="刷新" Command="{Binding ResetAndRefreshCommand}"
+                            Style="{StaticResource IndustrialButton}" Margin="0,0,8,0" Padding="12,5" FontSize="12"
+                            ToolTip="重置并刷新：清空历史数据，从当前时间点重新采集（保留手动调整量）"/>
                     <Button Content="设置" Command="{Binding ToggleSettingsCommand}"
                             Style="{StaticResource IndustrialButton}" Padding="12,5" FontSize="12"/>
                 </StackPanel>
@@ -270,9 +271,10 @@
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
                                         <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
 
-                                    <TextBlock Grid.Row="0" Grid.ColumnSpan="3" Text="手动调整 (增量 mm，正=下降)"
+                                    <TextBlock Grid.Row="0" Grid.ColumnSpan="4" Text="手动调整 (增量 mm，正=下降)"
                                                FontSize="10" Foreground="#FF757575" Margin="0,0,0,6"/>
 
                                     <!-- 数值输入框 -->
@@ -282,7 +284,7 @@
                                              ToolTip="允许输入小数的手动增量值 (mm)，正=下降、负=上升；受单步限幅约束。"/>
 
                                     <!-- 上下微调按钮 -->
-                                    <Grid Grid.Row="1" Grid.Column="1" Width="22" Margin="0,0,6,0">
+                                    <Grid Grid.Row="1" Grid.Column="1" Width="22" Margin="0,0,4,0">
                                         <Grid.RowDefinitions>
                                             <RowDefinition Height="*"/>
                                             <RowDefinition Height="*"/>
@@ -295,11 +297,17 @@
                                                 ToolTip="减少一步 (-0.001mm)"/>
                                     </Grid>
 
+                                    <!-- 推荐值按钮 -->
+                                    <Button Grid.Row="1" Grid.Column="2" Content="推荐" FontSize="11"
+                                            Style="{StaticResource IndustrialButton}" Padding="8,0" Margin="0,0,4,0"
+                                            Command="{Binding FillRecommendedCommand}" CommandParameter="0"
+                                            ToolTip="将当前自动计算的调整量填入输入框"/>
+
                                     <!-- 写入按钮 -->
-                                    <Button Grid.Row="1" Grid.Column="2" Content="写入" FontSize="12"
+                                    <Button Grid.Row="1" Grid.Column="3" Content="写入" FontSize="12"
                                             Style="{StaticResource IndustrialButton}" Padding="12,0"
                                             Command="{Binding ManualAdjustCommand}" CommandParameter="0"
-                                            ToolTip="把上面的增量值写入铆压#1 的调整地址。"/>
+                                            ToolTip="写入手动调整值到 PLC，并重置数据重新采集。"/>
                                 </Grid>
                             </Border>
                         </Grid>
@@ -385,9 +393,10 @@
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
                                         <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
 
-                                    <TextBlock Grid.Row="0" Grid.ColumnSpan="3" Text="手动调整 (增量 mm，正=下降)"
+                                    <TextBlock Grid.Row="0" Grid.ColumnSpan="4" Text="手动调整 (增量 mm，正=下降)"
                                                FontSize="10" Foreground="#FF757575" Margin="0,0,0,6"/>
 
                                     <!-- 数值输入框 -->
@@ -397,7 +406,7 @@
                                              ToolTip="允许输入小数的手动增量值 (mm)，正=下降、负=上升；受单步限幅约束。"/>
 
                                     <!-- 上下微调按钮 -->
-                                    <Grid Grid.Row="1" Grid.Column="1" Width="22" Margin="0,0,6,0">
+                                    <Grid Grid.Row="1" Grid.Column="1" Width="22" Margin="0,0,4,0">
                                         <Grid.RowDefinitions>
                                             <RowDefinition Height="*"/>
                                             <RowDefinition Height="*"/>
@@ -410,11 +419,17 @@
                                                 ToolTip="减少一步 (-0.001mm)"/>
                                     </Grid>
 
+                                    <!-- 推荐值按钮 -->
+                                    <Button Grid.Row="1" Grid.Column="2" Content="推荐" FontSize="11"
+                                            Style="{StaticResource IndustrialButton}" Padding="8,0" Margin="0,0,4,0"
+                                            Command="{Binding FillRecommendedCommand}" CommandParameter="1"
+                                            ToolTip="将当前自动计算的调整量填入输入框"/>
+
                                     <!-- 写入按钮 -->
-                                    <Button Grid.Row="1" Grid.Column="2" Content="写入" FontSize="12"
+                                    <Button Grid.Row="1" Grid.Column="3" Content="写入" FontSize="12"
                                             Style="{StaticResource IndustrialButton}" Padding="12,0"
                                             Command="{Binding ManualAdjustCommand}" CommandParameter="1"
-                                            ToolTip="把上面的增量值写入铆压#2 的调整地址。"/>
+                                            ToolTip="写入手动调整值到 PLC，并重置数据重新采集。"/>
                                 </Grid>
                             </Border>
                         </Grid>
@@ -685,16 +700,6 @@
                         <TextBox Text="{Binding Settings.Controller.MaxStepPerAdjust, UpdateSourceTrigger=LostFocus, StringFormat=F4, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
                                  Style="{StaticResource InputStyle}" Margin="0,0,0,10"
                                  ToolTip="单次补偿值的最大步长，防止一次调过头。必须大于 0。"/>
-
-                        <TextBlock Text="安全上限 (mm)" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
-                        <TextBox Text="{Binding Settings.Controller.SafetyUpperBound, UpdateSourceTrigger=LostFocus, StringFormat=F4, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
-                                 ToolTip="均值超过此物理合理上限即判 Outlier（异常）并停机报警。必须高于规格上限。"/>
-
-                        <TextBlock Text="安全下限 (mm)" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
-                        <TextBox Text="{Binding Settings.Controller.SafetyLowerBound, UpdateSourceTrigger=LostFocus, StringFormat=F4, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,14"
-                                 ToolTip="均值低于此物理合理下限即判 Outlier（异常）并停机报警。必须低于规格下限（安全范围要包住规格范围）。"/>
 
                         <Border Height="1" Background="#FF2A2A2A" Margin="0,4,0,12"/>
 

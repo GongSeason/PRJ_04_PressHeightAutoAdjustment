@@ -52,20 +52,6 @@ public class ControllerConfig
     /// <summary>Drift slope 最小幅度门限 (mm/拍) — |slope| 低于此值不判漂移，过滤噪声</summary>
     public double DriftSlopeThreshold { get; set; } = 0.0001;
 
-    // === 安全护栏参数 ===
-
-    /// <summary>合理性上限 — 均值超过此值判 Outlier (mm)</summary>
-    public double SafetyUpperBound { get; set; } = 12.80;
-
-    /// <summary>合理性下限 — 均值低于此值判 Outlier (mm)</summary>
-    public double SafetyLowerBound { get; set; } = 12.40;
-
-    /// <summary>σ 突增倍数 — 当前 σ 超过基线 σ 此倍数判 Outlier</summary>
-    public double SigmaSpikeFactor { get; set; } = 3.0;
-
-    /// <summary>数据失活超时 (秒)</summary>
-    public int DataStaleTimeoutSeconds { get; set; } = 60;
-
     // === 计算属性 ===
 
     /// <summary>规格中点 = (上限 + 下限) / 2，也是默认目标点</summary>
@@ -100,17 +86,6 @@ public class ControllerConfig
         if (DriftConfirmCycles < 1)
             throw new InvalidOperationException("漂移确认拍数必须大于 0。");
         RequireNonNegative(DriftSlopeThreshold, nameof(DriftSlopeThreshold));
-
-        RequireFinite(SafetyUpperBound, nameof(SafetyUpperBound));
-        RequireFinite(SafetyLowerBound, nameof(SafetyLowerBound));
-        if (SafetyUpperBound <= SafetyLowerBound)
-            throw new InvalidOperationException("安全上限必须大于安全下限。");
-        // 规格限必须落在安全限之内，否则合理性预警将失效。
-        if (SafetyUpperBound < UpperLimit || SafetyLowerBound > LowerLimit)
-            throw new InvalidOperationException("安全范围必须覆盖压接高度规格范围 [下限, 上限]。");
-        RequirePositive(SigmaSpikeFactor, nameof(SigmaSpikeFactor));
-        if (DataStaleTimeoutSeconds < 1)
-            throw new InvalidOperationException("数据失活超时必须大于 0 秒。");
     }
 
     private static void RequireFinite(double value, string name)

@@ -12,10 +12,7 @@ public enum HeadState
     Stable,
 
     /// <summary>漂移 — 偏差越界或 DriftScore 确认</summary>
-    Drift,
-
-    /// <summary>异常 — 安全护栏触发</summary>
-    Outlier
+    Drift
 }
 
 /// <summary>

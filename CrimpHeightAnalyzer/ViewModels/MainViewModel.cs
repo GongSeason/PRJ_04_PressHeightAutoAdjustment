@@ -34,6 +34,9 @@ public partial class MainViewModel : ObservableObject
     private DateTime? _lastAnalyzedDataTimestamp;
     private DateTime? _plcCommandDataTimestamp;
     private readonly HashSet<string> _issuedPlcCommandKeys = new();
+    private HeadDecision? _lastHeadADecision;
+    private HeadDecision? _lastHeadBDecision;
+    private DateTime? _resetTimestamp;
 
     public MainViewModel()
     {
@@ -208,8 +211,6 @@ public partial class MainViewModel : ObservableObject
     // 趋势图参考线持久化：只建一次，之后仅更新 Y 值，避免每次刷新重建导致虚线样式丢失。
     private RectangularSection? _trendUpperLimitSection;
     private RectangularSection? _trendLowerLimitSection;
-    private RectangularSection? _trendSafetyUpperSection;
-    private RectangularSection? _trendSafetyLowerSection;
     private RectangularSection? _trendMidpointSection;
 
     private const int CompensationHistoryLimit = 300;
@@ -347,8 +348,13 @@ public partial class MainViewModel : ObservableObject
             var data = await _dataProvider.GetLatestDataAsync(Settings.Controller.WindowSize);
             csvTimer.Stop();
             csvMs = csvTimer.ElapsedMilliseconds;
+
+            // 按重置时间戳过滤：只保留重置之后产生的数据
+            if (_resetTimestamp.HasValue)
+                data = data.Where(d => d.RecordedAt.HasValue && d.RecordedAt.Value >= _resetTimestamp.Value).ToList();
+
             _currentData = data;
-            PerformanceText = $"CSV {csvMs} ms | {_dataProvider.LastReadDiagnostics} | 读取 {data.Count} 条";
+            PerformanceText = $"CSV {csvMs} ms | {_dataProvider.LastReadDiagnostics} | 有效 {data.Count} 条";
 
             if (_currentData.Count == 0 || !_currentData.Any(d => d.IsValid))
             {
@@ -379,6 +385,8 @@ public partial class MainViewModel : ObservableObject
                 Settings.Controller, currentDataTimestamp, advanceDriftCycle);
 
             _lastAnalyzedDataTimestamp = currentDataTimestamp;
+            _lastHeadADecision = headAResult.Decision;
+            _lastHeadBDecision = headBResult.Decision;
 
             analysisTimer.Stop();
             analysisMs = analysisTimer.ElapsedMilliseconds;
@@ -459,8 +467,54 @@ public partial class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 手动把一个增量值写入对应压头的调整地址（人工干预通道）。
-    /// 复用 SendAdjustmentAsync，与自动下发共用浮点写入、日志等逻辑。
+    /// 将当前自动计算的调整量填入手动调整框，供用户参考或直接使用。
+    /// </summary>
+    [RelayCommand]
+    private void FillRecommended(string? headParam)
+    {
+        if (!int.TryParse(headParam, out int headIndex) || headIndex is not (0 or 1))
+            return;
+
+        double recommended = 0;
+        if (headIndex == 0 && _lastHeadADecision?.RequiresAction == true)
+            recommended = _lastHeadADecision.AdjustmentDelta;
+        else if (headIndex == 1 && _lastHeadBDecision?.RequiresAction == true)
+            recommended = _lastHeadBDecision.AdjustmentDelta;
+
+        if (headIndex == 0)
+            HeadAManualDelta = Math.Round(recommended, 5);
+        else
+            HeadBManualDelta = Math.Round(recommended, 5);
+
+        string headName = headIndex == 0 ? "铆压#1" : "铆压#2";
+        StatusText = $"{headName} 推荐值已填入: {recommended:F5}mm";
+    }
+
+    /// <summary>
+    /// 重置刷新：清空历史数据和分析状态，保留手动调整量，
+    /// 从当前时间点重新采集数据进行自动计算。
+    /// </summary>
+    [RelayCommand]
+    private async Task ResetAndRefreshAsync()
+    {
+        _resetTimestamp = DateTime.Now;
+        _headAArbiter.Reset();
+        _headBArbiter.Reset();
+        _lastAnalyzedDataTimestamp = null;
+        _plcCommandDataTimestamp = null;
+        _issuedPlcCommandKeys.Clear();
+        _lastHeadADecision = null;
+        _lastHeadBDecision = null;
+        _compensationIndex = 0;
+        _headACompensationValues.Clear();
+        _headBCompensationValues.Clear();
+
+        StatusText = "已重置，从当前时间点重新采集数据";
+        await RefreshDataAsync();
+    }
+
+    /// <summary>
+    /// 手动写入：只写入用户输入的手动调整值到 PLC，写入后自动重置刷新。
     /// </summary>
     [RelayCommand]
     private async Task ManualAdjustAsync(string? headParam)
@@ -481,29 +535,37 @@ public partial class MainViewModel : ObservableObject
         }
 
         string headName = headIndex == 0 ? "铆压#1" : "铆压#2";
-        double delta = headIndex == 0 ? HeadAManualDelta : HeadBManualDelta;
+        double manualDelta = headIndex == 0 ? HeadAManualDelta : HeadBManualDelta;
 
-        if (!double.IsFinite(delta) || delta == 0)
+        if (!double.IsFinite(manualDelta))
         {
-            StatusText = $"手动写入已跳过: {headName} 调整量为 0 或无效";
+            StatusText = $"手动写入已跳过: {headName} 调整量无效";
             return;
         }
 
-        // 安全护栏：单次手动增量不得超过单步限幅，避免误操作一次调过头。
+        // 安全护栏：手动值不得超过单步限幅。
         double maxStep = Settings.Controller.MaxStepPerAdjust;
-        if (Math.Abs(delta) > maxStep)
+        if (Math.Abs(manualDelta) > maxStep)
         {
-            StatusText = $"手动写入被拒绝: {headName} Δ={delta:F5}mm 超过单步限幅 ±{maxStep:F5}mm";
+            StatusText = $"手动写入被拒绝: {headName} Δ={manualDelta:F5}mm 超过单步限幅 ±{maxStep:F5}mm";
             return;
         }
 
         try
         {
-            StatusText = $"正在手动写入 {headName} Δ={delta:F5}mm ...";
-            bool ok = await plcAdapter.SendAdjustmentAsync(headIndex, delta);
-            StatusText = ok
-                ? $"手动写入成功: {headName} Δ={delta:F5}mm"
-                : $"手动写入失败: {headName} 未能写入 PLC（检查连接/地址）";
+            // 只写入手动调整值，不叠加自动调整量
+            StatusText = $"正在写入 {headName}: Δ={manualDelta:F5}mm ...";
+            bool ok = await plcAdapter.SendAdjustmentAsync(headIndex, manualDelta);
+            if (ok)
+            {
+                StatusText = $"写入成功: {headName} Δ={manualDelta:F5}mm，正在重置数据...";
+                // 写入成功后重置刷新，从当前时间点重新采集
+                await ResetAndRefreshAsync();
+            }
+            else
+            {
+                StatusText = $"写入失败: {headName} 未能写入 PLC（检查连接/地址）";
+            }
         }
         catch (Exception ex)
         {
@@ -542,14 +604,19 @@ public partial class MainViewModel : ObservableObject
         bool headASent = false;
         bool headBSent = false;
 
+        // 实际下发 = 手动基准 + 自动调整量
+        double headAAutoDelta = headADecision.RequiresAction ? headADecision.AdjustmentDelta : 0;
+        double headBAutoDelta = headBDecision.RequiresAction ? headBDecision.AdjustmentDelta : 0;
+        double headATotal = HeadAManualDelta + headAAutoDelta;
+        double headBTotal = HeadBManualDelta + headBAutoDelta;
+
         if (headADecision.RequiresAction)
         {
             string headAKey = FormattableString.Invariant(
-                $"adjust|0|{headADecision.AdjustmentDelta:R}");
+                $"adjust|0|{headATotal:R}");
             if (!_issuedPlcCommandKeys.Contains(headAKey))
             {
-                // 仅在写入成功后记录，失败时保留重试机会，避免调整量被漏发。
-                headASent = await plcAdapter.SendAdjustmentAsync(0, headADecision.AdjustmentDelta);
+                headASent = await plcAdapter.SendAdjustmentAsync(0, headATotal);
                 if (headASent)
                     _issuedPlcCommandKeys.Add(headAKey);
             }
@@ -558,10 +625,10 @@ public partial class MainViewModel : ObservableObject
         if (headBDecision.RequiresAction)
         {
             string headBKey = FormattableString.Invariant(
-                $"adjust|1|{headBDecision.AdjustmentDelta:R}");
+                $"adjust|1|{headBTotal:R}");
             if (!_issuedPlcCommandKeys.Contains(headBKey))
             {
-                headBSent = await plcAdapter.SendAdjustmentAsync(1, headBDecision.AdjustmentDelta);
+                headBSent = await plcAdapter.SendAdjustmentAsync(1, headBTotal);
                 if (headBSent)
                     _issuedPlcCommandKeys.Add(headBKey);
             }
@@ -702,7 +769,7 @@ public partial class MainViewModel : ObservableObject
         HeadADivergence = "单产品模式";
         HeadASlope = $"{result.CurrentSlope:F6} mm/拍";
 
-        UpdateStateDisplay(result.Decision, out string stateText, out string stateColor, out string adjustment, out string adjustmentColor);
+        UpdateStateDisplay(result.Decision, result.Deviation, out string stateText, out string stateColor, out string adjustment, out string adjustmentColor);
         HeadAState = stateText;
         HeadAStateColor = stateColor;
         HeadAAdjustment = adjustment;
@@ -724,14 +791,14 @@ public partial class MainViewModel : ObservableObject
         HeadBDivergence = "单产品模式";
         HeadBSlope = $"{result.CurrentSlope:F6} mm/拍";
 
-        UpdateStateDisplay(result.Decision, out string stateText, out string stateColor, out string adjustment, out string adjustmentColor);
+        UpdateStateDisplay(result.Decision, result.Deviation, out string stateText, out string stateColor, out string adjustment, out string adjustmentColor);
         HeadBState = stateText;
         HeadBStateColor = stateColor;
         HeadBAdjustment = adjustment;
         HeadBAdjustmentColor = adjustmentColor;
     }
 
-    private static void UpdateStateDisplay(HeadDecision decision,
+    private void UpdateStateDisplay(HeadDecision decision, double deviation,
         out string stateText, out string stateColor, out string adjustment, out string adjustmentColor)
     {
         switch (decision.State)
@@ -751,9 +818,11 @@ public partial class MainViewModel : ObservableObject
             case HeadState.Drift:
                 if (decision.DivergenceLevel == DivergenceLevel.Stop)
                 {
-                    stateText = "⛔ Diverged — 发散停止";
+                    double theoreticalDelta = ComputeTheoreticalDelta(deviation);
+                    var dir = R2RController.GetDirection(theoreticalDelta);
+                    stateText = "⛔ Diverged — 发散";
                     stateColor = "#FFEF5350";
-                    adjustment = "需维护，已停机";
+                    adjustment = $"{GetDirectionSymbol(dir)} Δ={theoreticalDelta:F5}mm (发散)";
                     adjustmentColor = "#FFEF5350"; // 红色
                 }
                 else if (decision.DivergenceLevel == DivergenceLevel.Degraded)
@@ -771,12 +840,6 @@ public partial class MainViewModel : ObservableObject
                     adjustmentColor = "#FFFFD54F"; // 黄色
                 }
                 break;
-            case HeadState.Outlier:
-                stateText = "🚨 Outlier — 异常";
-                stateColor = "#FFEF5350";
-                adjustment = "已停机报警";
-                adjustmentColor = "#FFEF5350"; // 红色
-                break;
             default:
                 stateText = "--";
                 stateColor = "#FFFFFFFF";
@@ -784,6 +847,15 @@ public partial class MainViewModel : ObservableObject
                 adjustmentColor = "#FFFFFFFF";
                 break;
         }
+    }
+
+    /// <summary>
+    /// 根据偏差计算理论调整量（用于 Outlier/发散等不实际下发但需要显示的场景）。
+    /// </summary>
+    private double ComputeTheoreticalDelta(double deviation)
+    {
+        double rawDelta = Settings.Controller.ControllerGain * deviation;
+        return Math.Clamp(rawDelta, -Settings.Controller.MaxStepPerAdjust, Settings.Controller.MaxStepPerAdjust);
     }
 
     private static string GetDirectionSymbol(AdjustmentDirection dir) => dir switch
@@ -886,10 +958,6 @@ public partial class MainViewModel : ObservableObject
             StrokeThickness = 1.5f,
             PathEffect = new DashEffect(new float[] { 6, 4 })
         });
-        _trendSafetyUpperSection = MakeSection(
-            new SolidColorPaint(new SKColor(239, 83, 80)) { StrokeThickness = 1.5f });
-        _trendSafetyLowerSection = MakeSection(
-            new SolidColorPaint(new SKColor(239, 83, 80)) { StrokeThickness = 1.5f });
         _trendMidpointSection = MakeSection(
             new SolidColorPaint(new SKColor(255, 255, 255, 60)) { StrokeThickness = 1 });
 
@@ -897,8 +965,6 @@ public partial class MainViewModel : ObservableObject
         {
             _trendUpperLimitSection,
             _trendLowerLimitSection,
-            _trendSafetyUpperSection,
-            _trendSafetyLowerSection,
             _trendMidpointSection
         };
     }
@@ -1049,53 +1115,35 @@ public partial class MainViewModel : ObservableObject
             _trendUpperLimitSection.Yi = _trendUpperLimitSection.Yj = ctrl.UpperLimit;
         if (_trendLowerLimitSection != null)
             _trendLowerLimitSection.Yi = _trendLowerLimitSection.Yj = ctrl.LowerLimit;
-        if (_trendSafetyUpperSection != null)
-            _trendSafetyUpperSection.Yi = _trendSafetyUpperSection.Yj = ctrl.SafetyUpperBound;
-        if (_trendSafetyLowerSection != null)
-            _trendSafetyLowerSection.Yi = _trendSafetyLowerSection.Yj = ctrl.SafetyLowerBound;
         if (_trendMidpointSection != null)
             _trendMidpointSection.Yi = _trendMidpointSection.Yj = Settings.TargetMidpoint;
     }
 
     /// <summary>
-    /// 计算趋势图 Y 轴范围：以安全带（安全上下限 + 少量余量）为核心固定视窗，
-    /// 只在安全带内按分位数扩展，彻底忽略落在安全带之外的异常值。
-    /// 这样 outlier 不会参与缩放，正常波动始终占满可视区，
-    /// 且安全带红线与规格带橙线都稳定可见。
+    /// 计算趋势图 Y 轴范围：以规格上下限为核心视窗，
+    /// 用分位数过滤极端值，保证正常波动占满可视区。
     /// </summary>
     private (double Min, double Max) ComputeRobustTrendRange(List<double> values)
     {
         var ctrl = Settings.Controller;
 
-        // 核心视窗：安全带外扩一段余量，保证安全上下限红线不贴边、清晰可见。
-        // 余量取安全带宽度的 8%（至少 0.02mm），让红线稳定落在可视区内。
-        double safetySpan = ctrl.SafetyUpperBound - ctrl.SafetyLowerBound;
-        double margin = Math.Max(safetySpan * 0.08, 0.02);
-        double yMin = ctrl.SafetyLowerBound - margin;
-        double yMax = ctrl.SafetyUpperBound + margin;
+        // 核心视窗：规格上下限外扩余量，保证规格线不贴边。
+        double specSpan = ctrl.UpperLimit - ctrl.LowerLimit;
+        double margin = Math.Max(specSpan * 0.15, 0.02);
+        double yMin = ctrl.LowerLimit - margin;
+        double yMax = ctrl.UpperLimit + margin;
 
         if (values.Count > 0)
         {
             var sorted = values.OrderBy(v => v).ToList();
 
-            // 只看落在安全带内的点；安全带外即为真正的 outlier，不参与缩放。
-            var inSafety = sorted
-                .Where(v => v >= ctrl.SafetyLowerBound && v <= ctrl.SafetyUpperBound)
-                .ToList();
-            if (inSafety.Count == 0) inSafety = sorted;
+            // 用 2%/98% 分位数裁掉极端值，防止拉伸。
+            double low = Percentile(sorted, 0.02);
+            double high = Percentile(sorted, 0.98);
 
-            // 用 2%/98% 分位数裁掉安全带内的零星极值，进一步防止拉伸。
-            double low = Percentile(inSafety, 0.02);
-            double high = Percentile(inSafety, 0.98);
-
-            // 允许数据在核心视窗基础上小幅外扩，但不会超出安全带硬裁剪。
             yMin = Math.Min(yMin, low - 0.005);
             yMax = Math.Max(yMax, high + 0.005);
         }
-
-        // 最终硬性裁剪到安全带，杜绝任何异常点把轴撑开。
-        yMin = Math.Max(yMin, ctrl.SafetyLowerBound - margin);
-        yMax = Math.Min(yMax, ctrl.SafetyUpperBound + margin);
 
         if (yMax - yMin < 0.01)
         {

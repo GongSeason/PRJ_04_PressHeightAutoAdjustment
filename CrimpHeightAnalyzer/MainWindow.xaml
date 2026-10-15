@@ -729,27 +729,22 @@
                         <TextBlock Text="压头A调整地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Plc.HeadAAdjustAddress, UpdateSourceTrigger=PropertyChanged}"
                                  Style="{StaticResource InputStyle}" Margin="0,0,0,10"
-                                 ToolTip="铆压#1 补偿值的写入寄存器（如 D100）。程序把补偿值 ×100000 取整为整数写入，PLC 梯形图需对应缩放回 mm。"/>
+                                 ToolTip="铆压#1 补偿值的写入寄存器（如 D100）。以 32 位浮点数写入，单位 mm。"/>
 
                         <TextBlock Text="压头B调整地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Plc.HeadBAdjustAddress, UpdateSourceTrigger=PropertyChanged}"
                                  Style="{StaticResource InputStyle}" Margin="0,0,0,10"
-                                 ToolTip="铆压#2 补偿值的写入寄存器（如 D102）。写入方式同压头A（×100000 的整数）。"/>
+                                 ToolTip="铆压#2 补偿值的写入寄存器（如 D102）。以 32 位浮点数写入，单位 mm。"/>
 
-                        <TextBlock Text="停机信号地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
-                        <TextBox Text="{Binding Settings.Plc.StopSignalAddress, UpdateSourceTrigger=PropertyChanged}"
+                        <TextBlock Text="压头A状态地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
+                        <TextBox Text="{Binding Settings.Plc.HeadAStatusAddress, UpdateSourceTrigger=PropertyChanged}"
                                  Style="{StaticResource InputStyle}" Margin="0,0,0,10"
-                                 ToolTip="触发停机时向此寄存器写入 1（1=停机，如 D200），用于异常/发散/数据失活时停机。"/>
+                                 ToolTip="铆压#1 写入完成状态寄存器（如 D200）。PC 写入偏移值后置 1，PLC 取走后置 0。"/>
 
-                        <TextBlock Text="压头A位置地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
-                        <TextBox Text="{Binding Settings.Plc.HeadAPositionAddress, UpdateSourceTrigger=PropertyChanged}"
-                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
-                                 ToolTip="读取铆压#1 当前位置的寄存器（如 D300），按 32 位浮点数读取，显示在界面“当前位置”。"/>
-
-                        <TextBlock Text="压头B位置地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
-                        <TextBox Text="{Binding Settings.Plc.HeadBPositionAddress, UpdateSourceTrigger=PropertyChanged}"
+                        <TextBlock Text="压头B状态地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
+                        <TextBox Text="{Binding Settings.Plc.HeadBStatusAddress, UpdateSourceTrigger=PropertyChanged}"
                                  Style="{StaticResource InputStyle}" Margin="0,0,0,14"
-                                 ToolTip="读取铆压#2 当前位置的寄存器（如 D302），按 32 位浮点数读取。"/>
+                                 ToolTip="铆压#2 写入完成状态寄存器（如 D202）。PC 写入偏移值后置 1，PLC 取走后置 0。"/>
 
                         <Button Content="保存设置" Command="{Binding SaveSettingsCommand}"
                                 Style="{StaticResource IndustrialButton}" Width="268"

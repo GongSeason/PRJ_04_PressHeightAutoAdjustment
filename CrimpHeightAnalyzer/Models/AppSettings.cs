@@ -58,14 +58,11 @@ public class PlcSettings
     /// <summary>压头 B 调整量寄存器地址</summary>
     public string HeadBAdjustAddress { get; set; } = "D102";
 
-    /// <summary>停机信号寄存器地址</summary>
-    public string StopSignalAddress { get; set; } = "D200";
+    /// <summary>压头 A 写入完成状态地址（PC 写1=已就绪，PLC 写0=已取走）</summary>
+    public string HeadAStatusAddress { get; set; } = "D200";
 
-    /// <summary>压头 A 当前位置寄存器地址</summary>
-    public string HeadAPositionAddress { get; set; } = "D300";
-
-    /// <summary>压头 B 当前位置寄存器地址</summary>
-    public string HeadBPositionAddress { get; set; } = "D302";
+    /// <summary>压头 B 写入完成状态地址（PC 写1=已就绪，PLC 写0=已取走）</summary>
+    public string HeadBStatusAddress { get; set; } = "D202";
 
     /// <summary>重连间隔时间（毫秒）</summary>
     public int ReconnectIntervalMs { get; set; } = 10000;

@@ -127,102 +127,37 @@ public class KeyencePlcAdapter : IPlcAdapter, IDisposable
             string address = headIndex == 0 ? _settings.HeadAAdjustAddress : _settings.HeadBAdjustAddress;
             string headName = headIndex == 0 ? "压头A" : "压头B";
 
-            // 将 mm 转换为 PLC 单位（保留 5 位小数精度，乘以 100000）
-            int plcValue = checked((int)Math.Round(
-                deltaMm * 100000,
-                MidpointRounding.AwayFromZero));
+            // 直接以浮点数写入 PLC 寄存器（32 位 float）
+            float plcValue = (float)deltaMm;
 
             var result = await _plc.WriteAsync(address, plcValue);
 
-            if (result.IsSuccess)
+            if (!result.IsSuccess)
             {
-                OnLog?.Invoke($"[PLC] {headName} 调整 {deltaMm:F5}mm 写入 {address}");
+                OnLog?.Invoke($"[PLC ERROR] {headName} 偏移值写入失败: {result.Message}");
+                IsConnected = false;
+                ScheduleReconnect();
+                OnConnectionChanged?.Invoke(false, $"写入失败: {result.Message}");
+                return false;
+            }
+
+            OnLog?.Invoke($"[PLC] {headName} 调整 {deltaMm:F5}mm 写入 {address}");
+
+            // 写入完成状态标志 = 1，通知 PLC 新偏移值已就绪
+            string statusAddress = headIndex == 0 ? _settings.HeadAStatusAddress : _settings.HeadBStatusAddress;
+            var statusResult = await _plc.WriteAsync(statusAddress, (short)1);
+
+            if (statusResult.IsSuccess)
+            {
+                OnLog?.Invoke($"[PLC] {headName} 状态标志已置1 ({statusAddress})");
                 return true;
             }
 
-            OnLog?.Invoke($"[PLC ERROR] {headName} 写入失败: {result.Message}");
+            OnLog?.Invoke($"[PLC ERROR] {headName} 状态标志写入失败: {statusResult.Message}");
             IsConnected = false;
             ScheduleReconnect();
             OnConnectionChanged?.Invoke(false, $"写入失败: {result.Message}");
             return false;
-        }
-        finally
-        {
-            _semaphore.Release();
-        }
-    }
-
-    /// <summary>
-    /// 发送停机指令
-    /// </summary>
-    public async Task<bool> SendStopAsync(string reason, CancellationToken cancellationToken = default)
-    {
-        if (_disposed) return false;
-
-        if (!await EnsureConnectedAsync(cancellationToken))
-        {
-            OnLog?.Invoke($"[PLC] 跳过停机: 未连接");
-            return false;
-        }
-
-        await _semaphore.WaitAsync(cancellationToken);
-        try
-        {
-            // 写入停机信号（1 = 停机）
-            var result = await _plc.WriteAsync(_settings.StopSignalAddress, 1);
-
-            if (result.IsSuccess)
-            {
-                OnLog?.Invoke($"[PLC] 停机信号已发送: {reason}");
-                return true;
-            }
-
-            OnLog?.Invoke($"[PLC ERROR] 停机信号发送失败: {result.Message}");
-            IsConnected = false;
-            ScheduleReconnect();
-            OnConnectionChanged?.Invoke(false, $"停机失败: {result.Message}");
-            return false;
-        }
-        finally
-        {
-            _semaphore.Release();
-        }
-    }
-
-    /// <summary>
-    /// 读取压头当前位置
-    /// </summary>
-    public async Task<double?> ReadHeadPositionAsync(int headIndex, CancellationToken cancellationToken = default)
-    {
-        if (_disposed) return null;
-
-        if (!await EnsureConnectedAsync(cancellationToken))
-        {
-            return null;
-        }
-
-        await _semaphore.WaitAsync(cancellationToken);
-        try
-        {
-            string address = headIndex == 0 ? _settings.HeadAPositionAddress : _settings.HeadBPositionAddress;
-            string headName = headIndex == 0 ? "压头A" : "压头B";
-
-            // 读取 32 位浮点数
-            var result = await _plc.ReadFloatAsync(address);
-
-            if (result.IsSuccess)
-            {
-                OnLog?.Invoke($"[PLC] {headName} 位置: {result.Content:F5}mm (从 {address})");
-                return result.Content;
-            }
-            else
-            {
-                OnLog?.Invoke($"[PLC ERROR] {headName} 位置读取失败: {result.Message}");
-                IsConnected = false;
-                ScheduleReconnect();
-                OnConnectionChanged?.Invoke(false, $"读取失败: {result.Message}");
-                return null;
-            }
         }
         finally
         {

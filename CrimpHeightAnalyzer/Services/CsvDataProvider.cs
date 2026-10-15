@@ -46,15 +46,16 @@ public class CsvDataProvider : IDataProvider
             }
 
             long bytesRead = 0;
+            int fallbackTimestampCount = 0;
             var readTimer = Stopwatch.StartNew();
             var allData = latestFile != null
-                ? ParseFileFromEnd(latestFile, count, cancellationToken, out bytesRead)
+                ? ParseFileFromEnd(latestFile, count, cancellationToken, out bytesRead, out fallbackTimestampCount)
                 : new List<CrimpData>();
             readTimer.Stop();
 
             LastReadDiagnostics = latestFile == null
                 ? $"定位 {locateTimer.ElapsedMilliseconds} ms | 未找到 CSV"
-                : $"定位 {locateTimer.ElapsedMilliseconds} ms | 尾读/解析 {readTimer.ElapsedMilliseconds} ms | 文件 {fileLength / 1024.0 / 1024.0:F1} MB | 实读 {bytesRead / 1024.0:F1} KB | {Path.GetFileName(latestFile)}";
+                : $"定位 {locateTimer.ElapsedMilliseconds} ms | 尾读/解析 {readTimer.ElapsedMilliseconds} ms | 文件 {fileLength / 1024.0 / 1024.0:F1} MB | 实读 {bytesRead / 1024.0:F1} KB | 时间戳回退 {fallbackTimestampCount} 行 | {Path.GetFileName(latestFile)}";
 
             LastDataTimestamp = allData.Count > 0 ? allData[^1].RecordedAt : null;
 
@@ -187,11 +188,14 @@ public class CsvDataProvider : IDataProvider
         string filePath,
         int maxCount,
         CancellationToken cancellationToken,
-        out long bytesRead)
+        out long bytesRead,
+        out int fallbackTimestampCount)
     {
         bytesRead = 0;
+        fallbackTimestampCount = 0;
         // 倒序收集：集满 maxCount 即停止；末尾为最新，稍后整体反转成正序。
         var reversed = new List<CrimpData>(maxCount);
+        DateTime? fallbackRecordedAt = null;
 
         try
         {
@@ -221,7 +225,9 @@ public class CsvDataProvider : IDataProvider
                 // 跳过空行。
                 if (string.IsNullOrWhiteSpace(line)) continue;
 
-                var data = ParseLine(line, filePath);
+                var data = ParseLine(line, filePath, ref fallbackRecordedAt, out bool usedFallbackTimestamp);
+                if (usedFallbackTimestamp)
+                    fallbackTimestampCount++;
                 if (data != null)
                     reversed.Add(data);
             }
@@ -329,15 +335,29 @@ public class CsvDataProvider : IDataProvider
         }
     }
 
-    private static CrimpData? ParseLine(string line, string filePath)
+    private static CrimpData? ParseLine(
+        string line,
+        string filePath,
+        ref DateTime? fallbackRecordedAt,
+        out bool usedFallbackTimestamp)
     {
+        usedFallbackTimestamp = false;
         var parts = line.Split(',');
         if (parts.Length < 7) return null;
+
+        DateTime? recordedAt = ParseTimestamp(parts[0], filePath);
+        if (!recordedAt.HasValue)
+        {
+            // 非标准时间戳时文件最后修改时间作为回退值；每次刷新只读取一次文件元数据。
+            fallbackRecordedAt ??= File.GetLastWriteTime(filePath);
+            recordedAt = fallbackRecordedAt;
+            usedFallbackTimestamp = true;
+        }
 
         return new CrimpData
         {
             Timestamp = parts[0].Trim(),
-            RecordedAt = ParseTimestamp(parts[0], filePath) ?? File.GetLastWriteTime(filePath),
+            RecordedAt = recordedAt.Value,
             Head1Height = ParseDouble(parts[1]),
             Head2Height = ParseDouble(parts[3])
         };
@@ -371,6 +391,7 @@ public class CsvDataProvider : IDataProvider
         string value = s.Trim();
         string[] dateTimeFormats = {
             "yyyyMMddHHmmssfff",
+            "yyyyMMddHHmmss",
             "yyyy-MM-dd HH:mm:ss",
             "yyyy/MM/dd HH:mm:ss",
             "yyyy-MM-dd HH:mm:ss.fff",
@@ -388,6 +409,39 @@ public class CsvDataProvider : IDataProvider
         {
             return dt;
         }
+
+        // 兼容上位机以数值/科学计数法写入的完整日期时间戳。
+        // 用 decimal 而不是 double，避免 17 位时间戳再发生二进制浮点精度损失。
+        if (decimal.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var numeric))
+        {
+            string digits = decimal.Truncate(numeric).ToString("0", CultureInfo.InvariantCulture);
+            if (DateTime.TryParseExact(
+                    digits,
+                    new[] { "yyyyMMddHHmmssfff", "yyyyMMddHHmmss" },
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None,
+                    out dt))
+            {
+                return dt;
+            }
+
+            // 兼容常见 Unix epoch 秒/毫秒格式。
+            try
+            {
+                if (numeric >= 1_000_000_000m && numeric < 253_402_300_800m)
+                    return DateTimeOffset.FromUnixTimeSeconds(decimal.ToInt64(numeric)).LocalDateTime;
+                if (numeric >= 100_000_000_000m && numeric < 253_402_300_800_000m)
+                    return DateTimeOffset.FromUnixTimeMilliseconds(decimal.ToInt64(numeric)).LocalDateTime;
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                // 数值超出 DateTimeOffset 支持范围，继续尝试其他格式/回退时间。
+            }
+        }
+
+        // 最后再尝试系统可识别的日期字符串。
+        if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out dt))
+            return dt;
 
         string[] timeFormats = { "HH-mm-ss-fff", "HH-mm-ss" };
         if (DateTime.TryParseExact(

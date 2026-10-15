@@ -18,6 +18,9 @@ x86/
 ## Rider
 .idea/
 
+## Resource files
+rsc/
+
 ## NuGet
 **/[Pp]ackages/*
 !**/[Pp]ackages/build/

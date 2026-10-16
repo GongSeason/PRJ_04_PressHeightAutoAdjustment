@@ -124,12 +124,13 @@ public class KeyencePlcAdapter : IPlcAdapter, IDisposable
         await _semaphore.WaitAsync(cancellationToken);
         try
         {
-            string address = headIndex == 0 ? _settings.HeadAAdjustAddress : _settings.HeadBAdjustAddress;
+            string address = (headIndex == 0 ? _settings.HeadAAdjustAddress : _settings.HeadBAdjustAddress)?.Trim() ?? "";
             string headName = headIndex == 0 ? "压头A" : "压头B";
 
             // 直接以浮点数写入 PLC 寄存器（32 位 float）
             float plcValue = (float)deltaMm;
 
+            OnLog?.Invoke($"[PLC] {headName} 准备写入: 地址=\"{address}\" (长度={address.Length}, bytes={BitConverter.ToString(System.Text.Encoding.UTF8.GetBytes(address))}), 值={plcValue}");
             var result = await _plc.WriteAsync(address, plcValue);
 
             if (!result.IsSuccess)

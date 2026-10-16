@@ -547,15 +547,6 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
-        // 安全护栏：手动值不得超过单步限幅。
-        double maxStep = Settings.Controller.MaxStepPerAdjust;
-        if (Math.Abs(manualDelta) > maxStep)
-        {
-            StatusText = $"手动写入被拒绝: {headName} Δ={manualDelta:F5}mm 超过单步限幅 ±{maxStep:F5}mm";
-            WriteLogToFile($"[手动写入] 拦截: 超限幅 |{manualDelta:F5}| > {maxStep:F5}");
-            return;
-        }
-
         try
         {
             // 只写入手动调整值，不叠加自动调整量

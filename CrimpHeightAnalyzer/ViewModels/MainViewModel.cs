@@ -671,7 +671,11 @@ public partial class MainViewModel : ObservableObject
         if (Settings.Plc.UseRealPlc)
         {
             var keyenceAdapter = new KeyencePlcAdapter(Settings.Plc);
-            keyenceAdapter.OnLog += msg => System.Diagnostics.Debug.WriteLine(msg);
+            keyenceAdapter.OnLog += msg =>
+            {
+                System.Diagnostics.Debug.WriteLine(msg);
+                WriteLogToFile(msg);
+            };
             keyenceAdapter.OnConnectionChanged += (connected, message) =>
             {
                 Application.Current.Dispatcher.Invoke(() =>
@@ -691,7 +695,11 @@ public partial class MainViewModel : ObservableObject
         else
         {
             var mockAdapter = new MockPlcAdapter();
-            mockAdapter.OnLog += msg => System.Diagnostics.Debug.WriteLine(msg);
+            mockAdapter.OnLog += msg =>
+            {
+                System.Diagnostics.Debug.WriteLine(msg);
+                WriteLogToFile(msg);
+            };
             _plcAdapter = mockAdapter;
 
             IsPlcConnected = false;
@@ -707,6 +715,29 @@ public partial class MainViewModel : ObservableObject
         _plcDisposable?.Dispose();
         _plcDisposable = null;
         _plcAdapter = null;
+    }
+
+    private static readonly object _logLock = new();
+    private static readonly string _logPath = Path.Combine(
+        AppDomain.CurrentDomain.BaseDirectory, "log");
+
+    private static void WriteLogToFile(string message)
+    {
+        try
+        {
+            Directory.CreateDirectory(_logPath);
+            string fileName = $"plc_{DateTime.Now:yyyyMMdd}.log";
+            string filePath = Path.Combine(_logPath, fileName);
+            string line = $"[{DateTime.Now:HH:mm:ss.fff}] {message}{Environment.NewLine}";
+            lock (_logLock)
+            {
+                File.AppendAllText(filePath, line);
+            }
+        }
+        catch
+        {
+            // 日志写入失败不影响主流程
+        }
     }
 
     private void SetupTimer()

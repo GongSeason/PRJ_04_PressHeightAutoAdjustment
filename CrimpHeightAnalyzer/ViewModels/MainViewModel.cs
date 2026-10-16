@@ -519,11 +519,12 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task ManualAdjustAsync(string? headParam)
     {
-        if (_dataProvider == null) return;
+        WriteLogToFile($"[手动写入] 开始, headParam={headParam}");
 
         if (!int.TryParse(headParam, out int headIndex) || headIndex is not (0 or 1))
         {
             StatusText = "手动写入失败: 压头参数无效";
+            WriteLogToFile($"[手动写入] 拦截: 压头参数无效 headParam={headParam}");
             return;
         }
 
@@ -531,15 +532,18 @@ public partial class MainViewModel : ObservableObject
         if (plcAdapter == null)
         {
             StatusText = "手动写入失败: PLC 未就绪";
+            WriteLogToFile("[手动写入] 拦截: _plcAdapter == null");
             return;
         }
 
         string headName = headIndex == 0 ? "铆压#1" : "铆压#2";
         double manualDelta = headIndex == 0 ? HeadAManualDelta : HeadBManualDelta;
+        WriteLogToFile($"[手动写入] {headName} manualDelta={manualDelta:F5}");
 
         if (!double.IsFinite(manualDelta))
         {
             StatusText = $"手动写入已跳过: {headName} 调整量无效";
+            WriteLogToFile($"[手动写入] 拦截: 调整量无效 manualDelta={manualDelta}");
             return;
         }
 
@@ -548,6 +552,7 @@ public partial class MainViewModel : ObservableObject
         if (Math.Abs(manualDelta) > maxStep)
         {
             StatusText = $"手动写入被拒绝: {headName} Δ={manualDelta:F5}mm 超过单步限幅 ±{maxStep:F5}mm";
+            WriteLogToFile($"[手动写入] 拦截: 超限幅 |{manualDelta:F5}| > {maxStep:F5}");
             return;
         }
 
@@ -555,7 +560,9 @@ public partial class MainViewModel : ObservableObject
         {
             // 只写入手动调整值，不叠加自动调整量
             StatusText = $"正在写入 {headName}: Δ={manualDelta:F5}mm ...";
+            WriteLogToFile($"[手动写入] 调用 SendAdjustmentAsync({headIndex}, {manualDelta:F5})");
             bool ok = await plcAdapter.SendAdjustmentAsync(headIndex, manualDelta);
+            WriteLogToFile($"[手动写入] SendAdjustmentAsync 返回: {ok}");
             if (ok)
             {
                 StatusText = $"写入成功: {headName} Δ={manualDelta:F5}mm，正在重置数据...";
@@ -569,6 +576,7 @@ public partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            WriteLogToFile($"[手动写入] 异常: {ex}");
             StatusText = $"手动写入异常: {ex.Message}";
         }
     }

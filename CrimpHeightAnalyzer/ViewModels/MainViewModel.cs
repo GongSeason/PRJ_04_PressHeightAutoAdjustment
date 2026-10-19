@@ -47,9 +47,6 @@ public partial class MainViewModel : ObservableObject
         InitDataProvider();
         SetupTimer();
         SetupCharts();
-
-        // 初始加载
-        _ = RefreshDataAsync();
     }
 
     #region 配置
@@ -81,6 +78,24 @@ public partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     private bool isPlcConnected;
+
+    #endregion
+
+    #region 运行状态
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsManualOperationAllowed))]
+    [NotifyPropertyChangedFor(nameof(RunButtonText))]
+    [NotifyPropertyChangedFor(nameof(RunButtonTooltip))]
+    private bool isRunning;
+
+    /// <summary>停止状态且非加载中时，允许手动操作</summary>
+    public bool IsManualOperationAllowed => !IsRunning && !IsLoading;
+
+    public string RunButtonText => IsRunning ? "⏹" : "▶";
+    public string RunButtonTooltip => IsRunning ? "停止自动运行" : "启动自动运行";
+
+    partial void OnIsLoadingChanged(bool value) => OnPropertyChanged(nameof(IsManualOperationAllowed));
 
     #endregion
 
@@ -239,6 +254,29 @@ public partial class MainViewModel : ObservableObject
     #region 命令
 
     [RelayCommand]
+    private void ToggleRun()
+    {
+        if (IsRunning)
+        {
+            // 停止
+            _refreshTimer.Stop();
+            IsRunning = false;
+            WriteLogToFile("[操作] 用户停止自动运行");
+            StatusText = "已停止自动运行";
+        }
+        else
+        {
+            // 启动
+            _refreshTimer.Interval = TimeSpan.FromSeconds(Math.Max(1, Settings.RefreshIntervalSeconds));
+            _refreshTimer.Start();
+            IsRunning = true;
+            WriteLogToFile("[操作] 用户启动自动运行");
+            StatusText = "自动运行中...";
+            _ = RefreshDataAsync();
+        }
+    }
+
+    [RelayCommand]
     private void ToggleSettings()
     {
         if (IsLoading)
@@ -288,7 +326,6 @@ public partial class MainViewModel : ObservableObject
         StatusText = "配置已保存";
 
         _refreshTimer.Interval = TimeSpan.FromSeconds(Settings.RefreshIntervalSeconds);
-        _ = RefreshDataAsync();
     }
 
     [RelayCommand]
@@ -481,12 +518,25 @@ public partial class MainViewModel : ObservableObject
         else if (headIndex == 1 && _lastHeadBDecision?.RequiresAction == true)
             recommended = _lastHeadBDecision.AdjustmentDelta;
 
+        string headName = headIndex == 0 ? "铆压#1" : "铆压#2";
+
+        var result = MessageBox.Show(
+            $"确认将推荐值 {recommended:F5}mm 填入 {headName} 的手动调整框？",
+            "确认操作", MessageBoxButton.YesNo, MessageBoxImage.Question);
+
+        if (result != MessageBoxResult.Yes)
+        {
+            WriteLogToFile($"[操作] 用户取消填入推荐值 {headName} Δ={recommended:F5}mm");
+            return;
+        }
+
+        WriteLogToFile($"[操作] 用户确认填入推荐值 {headName} Δ={recommended:F5}mm");
+
         if (headIndex == 0)
             HeadAManualDelta = Math.Round(recommended, 5);
         else
             HeadBManualDelta = Math.Round(recommended, 5);
 
-        string headName = headIndex == 0 ? "铆压#1" : "铆压#2";
         StatusText = $"{headName} 推荐值已填入: {recommended:F5}mm";
     }
 
@@ -546,6 +596,20 @@ public partial class MainViewModel : ObservableObject
             WriteLogToFile($"[手动写入] 拦截: 调整量无效 manualDelta={manualDelta}");
             return;
         }
+
+        string adjustAddress = headIndex == 0 ? Settings.Plc.HeadAAdjustAddress : Settings.Plc.HeadBAdjustAddress;
+        var confirmResult = MessageBox.Show(
+            $"确认将 {manualDelta:F5}mm 写入 {headName} 的 PLC 地址 {adjustAddress}？",
+            "确认写入", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+
+        if (confirmResult != MessageBoxResult.Yes)
+        {
+            WriteLogToFile($"[手动写入] 用户取消写入 {headName} Δ={manualDelta:F5}mm");
+            StatusText = "写入已取消";
+            return;
+        }
+
+        WriteLogToFile($"[手动写入] 用户确认写入 {headName} Δ={manualDelta:F5}mm → {adjustAddress}");
 
         try
         {
@@ -615,7 +679,9 @@ public partial class MainViewModel : ObservableObject
                 $"adjust|0|{headATotal:R}");
             if (!_issuedPlcCommandKeys.Contains(headAKey))
             {
+                WriteLogToFile($"[自动下发] 铆压#1: 手动={HeadAManualDelta:F5} + 自动={headAAutoDelta:F5} = 合计={headATotal:F5}mm");
                 headASent = await plcAdapter.SendAdjustmentAsync(0, headATotal);
+                WriteLogToFile($"[自动下发] 铆压#1 结果: {(headASent ? "成功" : "失败")}");
                 if (headASent)
                     _issuedPlcCommandKeys.Add(headAKey);
             }
@@ -627,7 +693,9 @@ public partial class MainViewModel : ObservableObject
                 $"adjust|1|{headBTotal:R}");
             if (!_issuedPlcCommandKeys.Contains(headBKey))
             {
+                WriteLogToFile($"[自动下发] 铆压#2: 手动={HeadBManualDelta:F5} + 自动={headBAutoDelta:F5} = 合计={headBTotal:F5}mm");
                 headBSent = await plcAdapter.SendAdjustmentAsync(1, headBTotal);
+                WriteLogToFile($"[自动下发] 铆压#2 结果: {(headBSent ? "成功" : "失败")}");
                 if (headBSent)
                     _issuedPlcCommandKeys.Add(headBKey);
             }
@@ -746,7 +814,7 @@ public partial class MainViewModel : ObservableObject
             Interval = TimeSpan.FromSeconds(Math.Max(1, Settings.RefreshIntervalSeconds))
         };
         _refreshTimer.Tick += async (s, e) => await RefreshDataAsync();
-        _refreshTimer.Start();
+        // 不自动启动，由用户点击启动按钮控制
     }
 
     private void ValidateSettings()

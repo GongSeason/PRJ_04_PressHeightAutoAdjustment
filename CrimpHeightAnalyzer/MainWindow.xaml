@@ -145,11 +145,16 @@
                            Foreground="#FFFAFAFA" VerticalAlignment="Center" HorizontalAlignment="Center"/>
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
-                    <Button Content="刷新" Command="{Binding ResetAndRefreshCommand}"
-                            Style="{StaticResource IndustrialButton}" Margin="0,0,8,0" Padding="12,5" FontSize="12"
+                    <Button Content="{Binding RunButtonText}" Command="{Binding ToggleRunCommand}"
+                            Style="{StaticResource IndustrialButton}" Margin="0,0,8,0" Padding="12,5" FontSize="14"
+                            ToolTip="{Binding RunButtonTooltip}"/>
+                    <Button Content="🔄" Command="{Binding ResetAndRefreshCommand}"
+                            IsEnabled="{Binding IsManualOperationAllowed}"
+                            Style="{StaticResource IndustrialButton}" Margin="0,0,8,0" Padding="12,5" FontSize="14"
                             ToolTip="重置并刷新：清空历史数据，从当前时间点重新采集（保留手动调整量）"/>
-                    <Button Content="设置" Command="{Binding ToggleSettingsCommand}"
-                            Style="{StaticResource IndustrialButton}" Padding="12,5" FontSize="12"/>
+                    <Button Content="⚙" Command="{Binding ToggleSettingsCommand}"
+                            Style="{StaticResource IndustrialButton}" Padding="12,5" FontSize="14"
+                            ToolTip="设置"/>
                 </StackPanel>
 
                 <!-- 窗口控制按钮（标准 Button，Click 事件） -->
@@ -280,9 +285,10 @@
 
                                     <!-- 数值输入框 -->
                                     <TextBox Grid.Row="1" Grid.Column="0" Style="{StaticResource InputStyle}"
+                                             IsEnabled="{Binding IsManualOperationAllowed}"
                                              VerticalContentAlignment="Center" Margin="0,0,4,0"
                                              Text="{Binding HeadAManualDelta, UpdateSourceTrigger=PropertyChanged, StringFormat=F5, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
-                                             ToolTip="允许输入小数的手动增量值 (mm)，正=下降、负=上升；受单步限幅约束。"/>
+                                             ToolTip="允许输入小数的手动增量值 (mm)，正=下降、负=上升。"/>
 
                                     <!-- 上下微调按钮 -->
                                     <Grid Grid.Row="1" Grid.Column="1" Width="22" Margin="0,0,4,0">
@@ -291,21 +297,25 @@
                                             <RowDefinition Height="*"/>
                                         </Grid.RowDefinitions>
                                         <Button Grid.Row="0" Content="▲" Style="{StaticResource SpinnerButton}"
+                                                IsEnabled="{Binding IsManualOperationAllowed}"
                                                 Command="{Binding StepManualDeltaCommand}" CommandParameter="0:1"
                                                 ToolTip="增加一步 (+0.001mm)"/>
                                         <Button Grid.Row="1" Content="▼" Style="{StaticResource SpinnerButton}"
+                                                IsEnabled="{Binding IsManualOperationAllowed}"
                                                 Command="{Binding StepManualDeltaCommand}" CommandParameter="0:-1"
                                                 ToolTip="减少一步 (-0.001mm)"/>
                                     </Grid>
 
                                     <!-- 推荐值按钮 -->
                                     <Button Grid.Row="1" Grid.Column="2" Content="推荐" FontSize="11"
+                                            IsEnabled="{Binding IsManualOperationAllowed}"
                                             Style="{StaticResource IndustrialButton}" Padding="8,0" Margin="0,0,4,0"
                                             Command="{Binding FillRecommendedCommand}" CommandParameter="0"
                                             ToolTip="将当前自动计算的调整量填入输入框"/>
 
                                     <!-- 写入按钮 -->
                                     <Button Grid.Row="1" Grid.Column="3" Content="写入" FontSize="12"
+                                            IsEnabled="{Binding IsManualOperationAllowed}"
                                             Style="{StaticResource IndustrialButton}" Padding="12,0"
                                             Command="{Binding ManualAdjustCommand}" CommandParameter="0"
                                             ToolTip="写入手动调整值到 PLC，并重置数据重新采集。"/>
@@ -402,9 +412,10 @@
 
                                     <!-- 数值输入框 -->
                                     <TextBox Grid.Row="1" Grid.Column="0" Style="{StaticResource InputStyle}"
+                                             IsEnabled="{Binding IsManualOperationAllowed}"
                                              VerticalContentAlignment="Center" Margin="0,0,4,0"
                                              Text="{Binding HeadBManualDelta, UpdateSourceTrigger=PropertyChanged, StringFormat=F5, ValidatesOnExceptions=True, NotifyOnValidationError=True}"
-                                             ToolTip="允许输入小数的手动增量值 (mm)，正=下降、负=上升；受单步限幅约束。"/>
+                                             ToolTip="允许输入小数的手动增量值 (mm)，正=下降、负=上升。"/>
 
                                     <!-- 上下微调按钮 -->
                                     <Grid Grid.Row="1" Grid.Column="1" Width="22" Margin="0,0,4,0">
@@ -413,21 +424,25 @@
                                             <RowDefinition Height="*"/>
                                         </Grid.RowDefinitions>
                                         <Button Grid.Row="0" Content="▲" Style="{StaticResource SpinnerButton}"
+                                                IsEnabled="{Binding IsManualOperationAllowed}"
                                                 Command="{Binding StepManualDeltaCommand}" CommandParameter="1:1"
                                                 ToolTip="增加一步 (+0.001mm)"/>
                                         <Button Grid.Row="1" Content="▼" Style="{StaticResource SpinnerButton}"
+                                                IsEnabled="{Binding IsManualOperationAllowed}"
                                                 Command="{Binding StepManualDeltaCommand}" CommandParameter="1:-1"
                                                 ToolTip="减少一步 (-0.001mm)"/>
                                     </Grid>
 
                                     <!-- 推荐值按钮 -->
                                     <Button Grid.Row="1" Grid.Column="2" Content="推荐" FontSize="11"
+                                            IsEnabled="{Binding IsManualOperationAllowed}"
                                             Style="{StaticResource IndustrialButton}" Padding="8,0" Margin="0,0,4,0"
                                             Command="{Binding FillRecommendedCommand}" CommandParameter="1"
                                             ToolTip="将当前自动计算的调整量填入输入框"/>
 
                                     <!-- 写入按钮 -->
                                     <Button Grid.Row="1" Grid.Column="3" Content="写入" FontSize="12"
+                                            IsEnabled="{Binding IsManualOperationAllowed}"
                                             Style="{StaticResource IndustrialButton}" Padding="12,0"
                                             Command="{Binding ManualAdjustCommand}" CommandParameter="1"
                                             ToolTip="写入手动调整值到 PLC，并重置数据重新采集。"/>
@@ -771,12 +786,16 @@
         <!-- ===== 底部状态栏 ===== -->
         <Border Grid.Row="2" Background="#FF1A1A1A" BorderBrush="#FF2A2A2A" BorderThickness="0,1,0,0"
                 Padding="12,6">
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                <Ellipse Width="10" Height="10" Fill="{Binding PlcStatusColor}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <TextBlock Text="PLC:" Foreground="#FF757575" FontSize="11" VerticalAlignment="Center" Margin="0,0,4,0"/>
-                <TextBlock Text="{Binding PlcStatusText}" Foreground="#FFB0B0B0" FontSize="11" VerticalAlignment="Center" Margin="0,0,16,0"/>
-                <TextBlock Text="{Binding StatusText}" Foreground="#FF80CBC4" FontSize="11" VerticalAlignment="Center"/>
-            </StackPanel>
+            <Grid>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Left">
+                    <Ellipse Width="10" Height="10" Fill="{Binding PlcStatusColor}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                    <TextBlock Text="PLC:" Foreground="#FF757575" FontSize="11" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                    <TextBlock Text="{Binding PlcStatusText}" Foreground="#FFB0B0B0" FontSize="11" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    <TextBlock Text="{Binding StatusText}" Foreground="#FF80CBC4" FontSize="11" VerticalAlignment="Center"/>
+                </StackPanel>
+                <TextBlock Text="MTD Automation  v.1.0.0" Foreground="#FF616161" FontSize="10"
+                           VerticalAlignment="Center" HorizontalAlignment="Right"/>
+            </Grid>
         </Border>
     </Grid>
     </Border>

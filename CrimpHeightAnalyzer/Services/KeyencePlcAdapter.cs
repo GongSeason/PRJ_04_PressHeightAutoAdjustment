@@ -125,12 +125,21 @@ public class KeyencePlcAdapter : IPlcAdapter, IDisposable
         try
         {
             string address = (headIndex == 0 ? _settings.HeadAAdjustAddress : _settings.HeadBAdjustAddress)?.Trim() ?? "";
+            string statusAddress = headIndex == 0 ? _settings.HeadAStatusAddress : _settings.HeadBStatusAddress;
             string headName = headIndex == 0 ? "压头A" : "压头B";
+
+            // P1-2: 写入前检查状态标志，若仍为 1 则上一条指令未被 PLC 处理
+            var statusReadResult = await _plc.ReadInt16Async(statusAddress);
+            if (statusReadResult.IsSuccess && statusReadResult.Content != 0)
+            {
+                OnLog?.Invoke($"[PLC] {headName} 跳过：上一条指令未被处理 (标志={statusReadResult.Content})");
+                return false;
+            }
 
             // 直接以浮点数写入 PLC 寄存器（32 位 float）
             float plcValue = (float)deltaMm;
 
-            OnLog?.Invoke($"[PLC] {headName} 准备写入: 地址=\"{address}\" (长度={address.Length}, bytes={BitConverter.ToString(System.Text.Encoding.UTF8.GetBytes(address))}), 值={plcValue}");
+            OnLog?.Invoke($"[PLC] {headName} 准备写入: 地址=\"{address}\", 值={plcValue}");
             var result = await _plc.WriteAsync(address, plcValue);
 
             if (!result.IsSuccess)
@@ -142,10 +151,27 @@ public class KeyencePlcAdapter : IPlcAdapter, IDisposable
                 return false;
             }
 
+            // P1-2: 回读校验
+            var readBackResult = await _plc.ReadFloatAsync(address);
+            if (readBackResult.IsSuccess)
+            {
+                float readBack = readBackResult.Content;
+                if (Math.Abs(readBack - plcValue) > 1e-6)
+                {
+                    OnLog?.Invoke($"[PLC ERROR] {headName} 回读校验失败: 写入={plcValue}, 读回={readBack}");
+                    return false;
+                }
+                OnLog?.Invoke($"[PLC] {headName} 回读校验通过: {readBack}");
+            }
+            else
+            {
+                OnLog?.Invoke($"[PLC WARN] {headName} 回读失败（写入可能成功）: {readBackResult.Message}");
+                // 回读失败不阻塞，继续置标志
+            }
+
             OnLog?.Invoke($"[PLC] {headName} 调整 {deltaMm:F5}mm 写入 {address}");
 
             // 写入完成状态标志 = 1，通知 PLC 新偏移值已就绪
-            string statusAddress = headIndex == 0 ? _settings.HeadAStatusAddress : _settings.HeadBStatusAddress;
             var statusResult = await _plc.WriteAsync(statusAddress, (short)1);
 
             if (statusResult.IsSuccess)
@@ -154,10 +180,11 @@ public class KeyencePlcAdapter : IPlcAdapter, IDisposable
                 return true;
             }
 
+            // P1-2: 修复 bug，原来引用的是 result.Message，应为 statusResult.Message
             OnLog?.Invoke($"[PLC ERROR] {headName} 状态标志写入失败: {statusResult.Message}");
             IsConnected = false;
             ScheduleReconnect();
-            OnConnectionChanged?.Invoke(false, $"写入失败: {result.Message}");
+            OnConnectionChanged?.Invoke(false, $"状态标志写入失败: {statusResult.Message}");
             return false;
         }
         finally

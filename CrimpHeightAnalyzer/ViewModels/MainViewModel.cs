@@ -10,6 +10,7 @@ using CrimpHeight.Core.Interfaces;
 using CrimpHeight.Core.Models;
 using CrimpHeightAnalyzer.Models;
 using CrimpHeightAnalyzer.Services;
+using System.Text.Json;
 using LiveChartsCore;
 using LiveChartsCore.Defaults;
 using LiveChartsCore.SkiaSharpView;
@@ -25,6 +26,7 @@ public partial class MainViewModel : ObservableObject
     private readonly DecisionArbiter _headAArbiter = new();
     private readonly DecisionArbiter _headBArbiter = new();
     private readonly SettingsService _settingsService = new();
+    private readonly CompensationStateService _compensationStateService = new();
     private CsvDataProvider? _dataProvider;
     private IPlcAdapter? _plcAdapter;
     private IDisposable? _plcDisposable;
@@ -32,11 +34,21 @@ public partial class MainViewModel : ObservableObject
     private DispatcherTimer _refreshTimer = null!;
     private List<CrimpData> _currentData = new();
     private DateTime? _lastAnalyzedDataTimestamp;
-    private DateTime? _plcCommandDataTimestamp;
-    private readonly HashSet<string> _issuedPlcCommandKeys = new();
     private HeadDecision? _lastHeadADecision;
     private HeadDecision? _lastHeadBDecision;
     private DateTime? _resetTimestamp;
+
+    // P0-1: 累计补偿追踪器（手动+自动共用）
+    private readonly CompensationTracker _headACompensation = new();
+    private readonly CompensationTracker _headBCompensation = new();
+
+    // P0-2: 每个压头独立的调整时间戳（数据时间轴），用于 bypass 旧数据
+    private DateTime? _headAAdjustDataTimestamp;
+    private DateTime? _headBAdjustDataTimestamp;
+
+    // P1-1: 每个压头自上一拍以来新增的有效样本数，用于修正 DriftScore 拍定义
+    private int _headALastDriftSampleCount;
+    private int _headBLastDriftSampleCount;
 
     public MainViewModel()
     {
@@ -44,6 +56,12 @@ public partial class MainViewModel : ObservableObject
             settings.HasGlobalSKTypeface(SKTypeface.FromFamilyName("Microsoft YaHei")));
 
         Settings = _settingsService.Load();
+
+        // P0-1: 从持久化文件恢复累计补偿值
+        var compensationState = _compensationStateService.Load();
+        _headACompensation.Reset(compensationState.HeadAAccumulated);
+        _headBCompensation.Reset(compensationState.HeadBAccumulated);
+
         InitDataProvider();
         SetupTimer();
         SetupCharts();
@@ -110,6 +128,16 @@ public partial class MainViewModel : ObservableObject
 
     // 上下微调按钮的步进量 (mm)。
     private const double ManualDeltaStep = 0.001;
+
+    #endregion
+
+    #region 累计补偿显示
+
+    [ObservableProperty]
+    private string headAAccumulatedCompensation = "0.00000";
+
+    [ObservableProperty]
+    private string headBAccumulatedCompensation = "0.00000";
 
     #endregion
 
@@ -410,16 +438,29 @@ public partial class MainViewModel : ObservableObject
             PerformanceText = $"CSV {csvMs} ms | 正在分析 {_currentData.Count} 条…";
             var analysisTimer = Stopwatch.StartNew();
             DateTime? currentDataTimestamp = _dataProvider.LastDataTimestamp;
-            bool advanceDriftCycle = currentDataTimestamp.HasValue
-                && currentDataTimestamp != _lastAnalyzedDataTimestamp;
 
-            // 每个压头仅对应一路高度；分别过滤有效值并独立决策。
-            var head1Values = _currentData.Where(d => d.IsHead1Valid).Select(d => d.Head1Height).ToList();
-            var head2Values = _currentData.Where(d => d.IsHead2Valid).Select(d => d.Head2Height).ToList();
+            // P0-2: 每个压头按各自的调整时间戳 bypass 旧数据，只取调整后的新数据
+            var headAData = _headAAdjustDataTimestamp.HasValue
+                ? _currentData.Where(d => d.RecordedAt.HasValue && d.RecordedAt.Value > _headAAdjustDataTimestamp.Value).ToList()
+                : _currentData;
+            var headBData = _headBAdjustDataTimestamp.HasValue
+                ? _currentData.Where(d => d.RecordedAt.HasValue && d.RecordedAt.Value > _headBAdjustDataTimestamp.Value).ToList()
+                : _currentData;
+
+            var head1Values = headAData.Where(d => d.IsHead1Valid).Select(d => d.Head1Height).ToList();
+            var head2Values = headBData.Where(d => d.IsHead2Valid).Select(d => d.Head2Height).ToList();
+
+            // P1-1: 只有新增样本数 >= DriftSampleStride 时才推进漂移检测拍
+            int driftSampleStride = Math.Max(10, Settings.Controller.MinSamplesPerEpoch / 2);
+            bool headAAdvanceDrift = (head1Values.Count - _headALastDriftSampleCount) >= driftSampleStride;
+            bool headBAdvanceDrift = (head2Values.Count - _headBLastDriftSampleCount) >= driftSampleStride;
+            if (headAAdvanceDrift) _headALastDriftSampleCount = head1Values.Count;
+            if (headBAdvanceDrift) _headBLastDriftSampleCount = head2Values.Count;
+
             var headAResult = _headAArbiter.ArbitrateSingle("铆压#1", head1Values,
-                Settings.Controller, currentDataTimestamp, advanceDriftCycle);
+                Settings.Controller, currentDataTimestamp, headAAdvanceDrift);
             var headBResult = _headBArbiter.ArbitrateSingle("铆压#2", head2Values,
-                Settings.Controller, currentDataTimestamp, advanceDriftCycle);
+                Settings.Controller, currentDataTimestamp, headBAdvanceDrift);
 
             _lastAnalyzedDataTimestamp = currentDataTimestamp;
             _lastHeadADecision = headAResult.Decision;
@@ -457,9 +498,13 @@ public partial class MainViewModel : ObservableObject
                 UpdateHeadBResults(headBResult);
                 UpdateAlerts(alerts);
                 UpdateCharts(_currentData);
+                // P0-1: 补偿图表绘制实际累计值
                 AppendCompensationPoint(
-                    GetCompensationChartValue(headAResult),
-                    GetCompensationChartValue(headBResult));
+                    _headACompensation.Accumulated,
+                    _headBCompensation.Accumulated);
+                // P0-1: 更新累计补偿显示
+                HeadAAccumulatedCompensation = _headACompensation.Accumulated.ToString("F5");
+                HeadBAccumulatedCompensation = _headBCompensation.Accumulated.ToString("F5");
                 StatusText = $"数据加载完成 - {_currentData.Count}条记录";
                 IsLoading = false;
             });
@@ -547,14 +592,19 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task ResetAndRefreshAsync()
     {
-        _resetTimestamp = DateTime.Now;
+        // P1-3: 用数据时间轴，不用上位机时间
+        _resetTimestamp = _dataProvider?.LastDataTimestamp ?? DateTime.Now;
         _headAArbiter.Reset();
         _headBArbiter.Reset();
         _lastAnalyzedDataTimestamp = null;
-        _plcCommandDataTimestamp = null;
-        _issuedPlcCommandKeys.Clear();
         _lastHeadADecision = null;
         _lastHeadBDecision = null;
+        // P0-2: 重置两个压头的调整时间戳（但不清零 CompensationTracker 累计值）
+        _headAAdjustDataTimestamp = null;
+        _headBAdjustDataTimestamp = null;
+        // P1-1: 重置漂移拍计数
+        _headALastDriftSampleCount = 0;
+        _headBLastDriftSampleCount = 0;
         _compensationIndex = 0;
         _headACompensationValues.Clear();
         _headBCompensationValues.Clear();
@@ -613,19 +663,50 @@ public partial class MainViewModel : ObservableObject
 
         try
         {
-            // 只写入手动调整值，不叠加自动调整量
-            StatusText = $"正在写入 {headName}: Δ={manualDelta:F5}mm ...";
-            WriteLogToFile($"[手动写入] 调用 SendAdjustmentAsync({headIndex}, {manualDelta:F5})");
-            bool ok = await plcAdapter.SendAdjustmentAsync(headIndex, manualDelta);
+            // P0-1: 手动调整也通过 CompensationTracker，PLC 收到累计绝对补偿值
+            var tracker = headIndex == 0 ? _headACompensation : _headBCompensation;
+            double previousAccumulated = tracker.Accumulated;
+            tracker.Apply(manualDelta);
+            double plcValue = tracker.Accumulated;
+
+            StatusText = $"正在写入 {headName}: Δ={manualDelta:F5}mm, 累计={plcValue:F5}mm ...";
+            WriteLogToFile($"[手动写入] 调用 SendAdjustmentAsync({headIndex}, {plcValue:F5}) (Δ={manualDelta:F5}, 累计={plcValue:F5})");
+            bool ok = await plcAdapter.SendAdjustmentAsync(headIndex, plcValue);
             WriteLogToFile($"[手动写入] SendAdjustmentAsync 返回: {ok}");
             if (ok)
             {
-                StatusText = $"写入成功: {headName} Δ={manualDelta:F5}mm，正在重置数据...";
-                // 写入成功后重置刷新，从当前时间点重新采集
-                await ResetAndRefreshAsync();
+                // P0-2: 手动调整后也 bypass 旧数据
+                var currentDataTimestamp = _dataProvider?.LastDataTimestamp;
+                if (headIndex == 0)
+                    _headAAdjustDataTimestamp = currentDataTimestamp;
+                else
+                    _headBAdjustDataTimestamp = currentDataTimestamp;
+
+                SaveCompensationState();
+
+                // 清零输入框
+                if (headIndex == 0)
+                    HeadAManualDelta = 0;
+                else
+                    HeadBManualDelta = 0;
+
+                // 更新累计补偿显示
+                HeadAAccumulatedCompensation = _headACompensation.Accumulated.ToString("F5");
+                HeadBAccumulatedCompensation = _headBCompensation.Accumulated.ToString("F5");
+
+                StatusText = $"写入成功: {headName} Δ={manualDelta:F5}mm, 累计={plcValue:F5}mm，等待新数据...";
+                WriteLogToFile($"[手动写入] 成功，已设置 bypass 时间戳，等待 warmup");
+
+                // 重置对应压头的仲裁器漂移历史
+                if (headIndex == 0)
+                    _headAArbiter.Reset();
+                else
+                    _headBArbiter.Reset();
             }
             else
             {
+                // 写入失败回滚
+                tracker.Reset(previousAccumulated);
                 StatusText = $"写入失败: {headName} 未能写入 PLC（检查连接/地址）";
             }
         }
@@ -646,8 +727,10 @@ public partial class MainViewModel : ObservableObject
         _headAArbiter.Reset();
         _headBArbiter.Reset();
         _lastAnalyzedDataTimestamp = null;
-        _plcCommandDataTimestamp = null;
-        _issuedPlcCommandKeys.Clear();
+        _headAAdjustDataTimestamp = null;
+        _headBAdjustDataTimestamp = null;
+        _headALastDriftSampleCount = 0;
+        _headBLastDriftSampleCount = 0;
         _compensationIndex = 0;
         _headACompensationValues.Clear();
         _headBCompensationValues.Clear();
@@ -662,54 +745,72 @@ public partial class MainViewModel : ObservableObject
         var plcAdapter = _plcAdapter;
         if (plcAdapter == null) return (false, false);
 
-        PreparePlcCommandVersion(dataTimestamp);
-
         bool headASent = false;
         bool headBSent = false;
 
-        // 实际下发 = 手动基准 + 自动调整量
-        double headAAutoDelta = headADecision.RequiresAction ? headADecision.AdjustmentDelta : 0;
-        double headBAutoDelta = headBDecision.RequiresAction ? headBDecision.AdjustmentDelta : 0;
-        double headATotal = HeadAManualDelta + headAAutoDelta;
-        double headBTotal = HeadBManualDelta + headBAutoDelta;
-
+        // P0-1: 自动下发通过 CompensationTracker 累计，PLC 收到绝对补偿值
         if (headADecision.RequiresAction)
         {
-            string headAKey = FormattableString.Invariant(
-                $"adjust|0|{headATotal:R}");
-            if (!_issuedPlcCommandKeys.Contains(headAKey))
+            double autoDelta = headADecision.AdjustmentDelta;
+            double previousAccumulated = _headACompensation.Accumulated;
+            _headACompensation.Apply(autoDelta);
+            double plcValue = _headACompensation.Accumulated;
+
+            WriteLogToFile($"[自动下发] 铆压#1: Δ={autoDelta:F5}mm, 累计={plcValue:F5}mm");
+            headASent = await plcAdapter.SendAdjustmentAsync(0, plcValue);
+            WriteLogToFile($"[自动下发] 铆压#1 结果: {(headASent ? "成功" : "失败")}");
+
+            if (headASent)
             {
-                WriteLogToFile($"[自动下发] 铆压#1: 手动={HeadAManualDelta:F5} + 自动={headAAutoDelta:F5} = 合计={headATotal:F5}mm");
-                headASent = await plcAdapter.SendAdjustmentAsync(0, headATotal);
-                WriteLogToFile($"[自动下发] 铆压#1 结果: {(headASent ? "成功" : "失败")}");
-                if (headASent)
-                    _issuedPlcCommandKeys.Add(headAKey);
+                // P0-2: 记录调整时间戳，后续 bypass 旧数据
+                _headAAdjustDataTimestamp = dataTimestamp;
+                _headAArbiter.Reset();
+                SaveCompensationState();
+            }
+            else
+            {
+                // 写入失败回滚
+                _headACompensation.Reset(previousAccumulated);
             }
         }
 
         if (headBDecision.RequiresAction)
         {
-            string headBKey = FormattableString.Invariant(
-                $"adjust|1|{headBTotal:R}");
-            if (!_issuedPlcCommandKeys.Contains(headBKey))
+            double autoDelta = headBDecision.AdjustmentDelta;
+            double previousAccumulated = _headBCompensation.Accumulated;
+            _headBCompensation.Apply(autoDelta);
+            double plcValue = _headBCompensation.Accumulated;
+
+            WriteLogToFile($"[自动下发] 铆压#2: Δ={autoDelta:F5}mm, 累计={plcValue:F5}mm");
+            headBSent = await plcAdapter.SendAdjustmentAsync(1, plcValue);
+            WriteLogToFile($"[自动下发] 铆压#2 结果: {(headBSent ? "成功" : "失败")}");
+
+            if (headBSent)
             {
-                WriteLogToFile($"[自动下发] 铆压#2: 手动={HeadBManualDelta:F5} + 自动={headBAutoDelta:F5} = 合计={headBTotal:F5}mm");
-                headBSent = await plcAdapter.SendAdjustmentAsync(1, headBTotal);
-                WriteLogToFile($"[自动下发] 铆压#2 结果: {(headBSent ? "成功" : "失败")}");
-                if (headBSent)
-                    _issuedPlcCommandKeys.Add(headBKey);
+                _headBAdjustDataTimestamp = dataTimestamp;
+                _headBArbiter.Reset();
+                SaveCompensationState();
+            }
+            else
+            {
+                _headBCompensation.Reset(previousAccumulated);
             }
         }
 
         return (headASent, headBSent);
     }
 
-    private void PreparePlcCommandVersion(DateTime? dataTimestamp)
+    /// <summary>
+    /// P0-1: 持久化累计补偿状态
+    /// </summary>
+    private void SaveCompensationState()
     {
-        if (dataTimestamp == _plcCommandDataTimestamp) return;
-
-        _plcCommandDataTimestamp = dataTimestamp;
-        _issuedPlcCommandKeys.Clear();
+        _compensationStateService.Save(new CompensationState
+        {
+            HeadAAccumulated = _headACompensation.Accumulated,
+            HeadBAccumulated = _headBCompensation.Accumulated,
+            LastSavedAt = DateTime.Now
+        });
     }
 
     private void InitPlcAdapter()
@@ -1136,29 +1237,6 @@ public partial class MainViewModel : ObservableObject
                 Fill = null
             }
         };
-    }
-
-    /// <summary>
-    /// 返回补偿图表的理论值，不代表 PLC 实际下发值。
-    /// 仅在 WarmUp（样本不足）时显示决策值；其余有分析结果的状态，
-    /// 按偏差 × 增益计算并限幅，使 Stable/停机状态也能显示有意义的候选补偿值。
-    /// PLC 下发仍由 SendPlcCommandsAsync 根据决策状态控制。
-    /// </summary>
-    private double GetCompensationChartValue(HeadAnalysisResult result)
-    {
-        if (result.Decision.State == HeadState.WarmUp)
-            return result.Decision.AdjustmentDelta;
-
-        // Drift 实际动作使用仲裁结果（包含降 K 等控制策略）；停机/稳定才显示理论候选值。
-        if (result.Decision.RequiresAction)
-            return result.Decision.AdjustmentDelta;
-
-        double theoreticalDelta = result.Deviation * Settings.Controller.ControllerGain;
-        return double.IsFinite(theoreticalDelta)
-            ? Math.Clamp(theoreticalDelta,
-                -Settings.Controller.MaxStepPerAdjust,
-                Settings.Controller.MaxStepPerAdjust)
-            : 0;
     }
 
     private void AppendCompensationPoint(double headAValue, double headBValue)

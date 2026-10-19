@@ -52,10 +52,13 @@ public class ControllerConfig
     /// <summary>Drift slope 最小幅度门限 (mm/拍) — |slope| 低于此值不判漂移，过滤噪声</summary>
     public double DriftSlopeThreshold { get; set; } = 0.0001;
 
-    // === 计算属性 ===
+    // === 目标点 ===
 
-    /// <summary>规格中点 = (上限 + 下限) / 2，也是默认目标点</summary>
-    public double TargetMidpoint => (UpperLimit + LowerLimit) / 2.0;
+    /// <summary>
+    /// 目标点 (mm)。可独立配置，不必等于规格中点。
+    /// 若未配置（保持默认 0），Validate() 会自动设为 (UpperLimit + LowerLimit) / 2。
+    /// </summary>
+    public double TargetMidpoint { get; set; }
 
     public void Validate()
     {
@@ -86,6 +89,17 @@ public class ControllerConfig
         if (DriftConfirmCycles < 1)
             throw new InvalidOperationException("漂移确认拍数必须大于 0。");
         RequireNonNegative(DriftSlopeThreshold, nameof(DriftSlopeThreshold));
+
+        // TargetMidpoint：未配置时自动取规格中点
+        if (TargetMidpoint == 0 || !double.IsFinite(TargetMidpoint))
+        {
+            TargetMidpoint = (UpperLimit + LowerLimit) / 2.0;
+        }
+        else if (TargetMidpoint < LowerLimit || TargetMidpoint > UpperLimit)
+        {
+            throw new InvalidOperationException(
+                $"目标点 {TargetMidpoint} 必须在规格范围 [{LowerLimit}, {UpperLimit}] 内。");
+        }
     }
 
     private static void RequireFinite(double value, string name)

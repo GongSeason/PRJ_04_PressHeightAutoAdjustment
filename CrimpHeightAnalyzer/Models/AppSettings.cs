@@ -29,6 +29,13 @@ public class AppSettings
     /// <summary>PLC 通信配置</summary>
     public PlcSettings Plc { get; set; } = new();
 
+    // === 运行模式 ===
+
+    /// <summary>
+    /// 节能模式：开启时 Stable 状态不下发（默认）；关闭时 Stable 也下发微小偏差。
+    /// </summary>
+    public bool EnergySavingMode { get; set; } = true;
+
     // === 便捷属性 ===
 
     [JsonIgnore]

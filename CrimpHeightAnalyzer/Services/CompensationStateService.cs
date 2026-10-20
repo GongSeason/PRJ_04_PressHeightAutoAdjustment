@@ -65,6 +65,12 @@ public class CompensationState
     /// <summary>压头 B 累计补偿 (mm)</summary>
     public double HeadBAccumulated { get; set; }
 
+    /// <summary>压头 A 手动输入偏差值 (mm)</summary>
+    public double HeadAManualDelta { get; set; }
+
+    /// <summary>压头 B 手动输入偏差值 (mm)</summary>
+    public double HeadBManualDelta { get; set; }
+
     /// <summary>最后保存时间</summary>
     public DateTime? LastSavedAt { get; set; }
 }

@@ -61,10 +61,12 @@ public partial class MainViewModel : ObservableObject
 
         Settings = _settingsService.Load();
 
-        // P0-1: 从持久化文件恢复累计补偿值
+        // P0-1: 从持久化文件恢复累计补偿值和手动偏差值
         var compensationState = _compensationStateService.Load();
         _headACompensation.Reset(compensationState.HeadAAccumulated);
         _headBCompensation.Reset(compensationState.HeadBAccumulated);
+        HeadAManualDelta = compensationState.HeadAManualDelta;
+        HeadBManualDelta = compensationState.HeadBManualDelta;
 
         InitDataProvider();
         SetupTimer();
@@ -132,16 +134,6 @@ public partial class MainViewModel : ObservableObject
 
     // 上下微调按钮的步进量 (mm)。
     private const double ManualDeltaStep = 0.001;
-
-    #endregion
-
-    #region 节能模式
-
-    /// <summary>
-    /// 节能模式：开启时 Stable 状态不下发（默认）；关闭时 Stable 也下发微小偏差。
-    /// </summary>
-    [ObservableProperty]
-    private bool isEnergySavingMode = true;
 
     #endregion
 
@@ -512,10 +504,10 @@ public partial class MainViewModel : ObservableObject
                 UpdateHeadBResults(headBResult);
                 UpdateAlerts(alerts);
                 UpdateCharts(_currentData);
-                // P0-1: 补偿图表绘制实际累计值
+                // 补偿图表绘制理论调整值（K × deviation 限幅），始终有波动
                 AppendCompensationPoint(
-                    _headACompensation.Accumulated,
-                    _headBCompensation.Accumulated);
+                    ComputeTheoreticalDelta(headAResult.Deviation),
+                    ComputeTheoreticalDelta(headBResult.Deviation));
                 // P0-1: 更新累计补偿显示
                 HeadAAccumulatedCompensation = _headACompensation.Accumulated.ToString("F5");
                 HeadBAccumulatedCompensation = _headBCompensation.Accumulated.ToString("F5");
@@ -828,7 +820,7 @@ public partial class MainViewModel : ObservableObject
             autoDelta = decision.AdjustmentDelta;
             shouldSend = true;
         }
-        else if (!IsEnergySavingMode && decision.State == HeadState.Stable)
+        else if (!Settings.EnergySavingMode && decision.State == HeadState.Stable)
         {
             // 非节能模式 + Stable：计算微小偏差（跳过死区，直接 K × deviation 限幅）
             autoDelta = ComputeTheoreticalDelta(result.Deviation);
@@ -879,6 +871,8 @@ public partial class MainViewModel : ObservableObject
         {
             HeadAAccumulated = _headACompensation.Accumulated,
             HeadBAccumulated = _headBCompensation.Accumulated,
+            HeadAManualDelta = HeadAManualDelta,
+            HeadBManualDelta = HeadBManualDelta,
             LastSavedAt = DateTime.Now
         });
     }
@@ -1081,7 +1075,8 @@ public partial class MainViewModel : ObservableObject
             case HeadState.Stable:
                 stateText = "✓ Stable — 稳定";
                 stateColor = "#FF66BB6A";
-                adjustment = "无需调整";
+                double stableDelta = ComputeTheoreticalDelta(deviation);
+                adjustment = $"Δ={stableDelta:F5}mm (稳定)";
                 adjustmentColor = "#FF66BB6A"; // 绿色
                 break;
             case HeadState.Drift:

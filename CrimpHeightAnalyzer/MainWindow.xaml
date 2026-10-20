@@ -581,7 +581,7 @@
                             </Grid.ColumnDefinitions>
 
                             <StackPanel Grid.Row="0" Grid.ColumnSpan="2" Margin="0,0,0,8">
-                                <TextBlock Text="补偿值波动 (理论值仅绘图；停机/稳定时不下发)"
+                                <TextBlock Text="偏差趋势 (理论调整量 K×偏差，反映实时波动)"
                                            FontSize="12" FontWeight="Bold" Foreground="#FFB0B0B0"/>
                                 <TextBlock Text="{Binding PerformanceText}" FontSize="9" Foreground="#FF80CBC4"
                                            TextWrapping="Wrap" Margin="0,3,0,0"/>
@@ -771,7 +771,7 @@
 
                         <TextBlock Text="运行模式" FontSize="13" FontWeight="Bold" Foreground="#FFB0B0B0" Margin="0,0,0,10"/>
 
-                        <CheckBox Content="节能模式" IsChecked="{Binding IsEnergySavingMode}"
+                        <CheckBox Content="节能模式" IsChecked="{Binding Settings.EnergySavingMode}"
                                   Foreground="#FFFAFAFA" FontSize="13" Margin="0,0,0,6"
                                   ToolTip="开启（默认）：Stable 状态不下发补偿值，仅 Drift 越界时下发。&#x0a;关闭：即使 Stable 状态也将微小偏差下发给 PLC，每次刷新都写入。"/>
                         <TextBlock Text="关闭节能模式后，Stable 状态也会将微小偏差持续下发给 PLC"

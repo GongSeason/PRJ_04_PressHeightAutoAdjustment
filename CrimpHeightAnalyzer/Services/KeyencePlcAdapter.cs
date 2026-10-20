@@ -136,40 +136,59 @@ public class KeyencePlcAdapter : IPlcAdapter, IDisposable
                 return false;
             }
 
-            // 需求4: 写入 32 位整数（mm × 1000 取整），PLC 侧已改为接收整数
+            // 需求4: 写入有符号 32 位整数（mm × 1000 取整）
+            // 手动拆成两个 16 位 short 分别写入，确保字节序与 PLC 一致：
+            //   address（如 D9000）= 低 16 位，address+1（如 D9001）= 高 16 位
             int plcValue = (int)Math.Round(deltaMm * 1000);
+            short lowWord = (short)(plcValue & 0xFFFF);          // 低 16 位
+            short highWord = (short)((plcValue >> 16) & 0xFFFF); // 高 16 位
 
-            OnLog?.Invoke($"[PLC] {headName} 准备写入: 地址=\"{address}\", 值={plcValue} (原始={deltaMm:F5}mm × 1000)");
-            var result = await _plc.WriteAsync(address, plcValue);
+            // 解析地址：提取寄存器前缀和编号，+1 得到高字地址
+            string highAddress = IncrementAddress(address);
 
-            if (!result.IsSuccess)
+            OnLog?.Invoke($"[PLC] {headName} 准备写入: {address}={lowWord}(低), {highAddress}={highWord}(高), 合计={plcValue} (原始={deltaMm:F5}mm × 1000)");
+
+            // 先写低 16 位
+            var resultLow = await _plc.WriteAsync(address, lowWord);
+            if (!resultLow.IsSuccess)
             {
-                OnLog?.Invoke($"[PLC ERROR] {headName} 偏移值写入失败: {result.Message}");
+                OnLog?.Invoke($"[PLC ERROR] {headName} 低字写入失败: {resultLow.Message}");
                 IsConnected = false;
                 ScheduleReconnect();
-                OnConnectionChanged?.Invoke(false, $"写入失败: {result.Message}");
+                OnConnectionChanged?.Invoke(false, $"写入失败: {resultLow.Message}");
                 return false;
             }
 
-            // P1-2: 回读校验（int32）
-            var readBackResult = await _plc.ReadInt32Async(address);
-            if (readBackResult.IsSuccess)
+            // 再写高 16 位
+            var resultHigh = await _plc.WriteAsync(highAddress, highWord);
+            if (!resultHigh.IsSuccess)
             {
-                int readBack = readBackResult.Content;
+                OnLog?.Invoke($"[PLC ERROR] {headName} 高字写入失败: {resultHigh.Message}");
+                IsConnected = false;
+                ScheduleReconnect();
+                OnConnectionChanged?.Invoke(false, $"写入失败: {resultHigh.Message}");
+                return false;
+            }
+
+            // 回读校验：分别读回两个 16 位字，拼成 32 位验证
+            var readLow = await _plc.ReadInt16Async(address);
+            var readHigh = await _plc.ReadInt16Async(highAddress);
+            if (readLow.IsSuccess && readHigh.IsSuccess)
+            {
+                int readBack = (int)(((uint)(ushort)readHigh.Content << 16) | (uint)(ushort)readLow.Content);
                 if (readBack != plcValue)
                 {
-                    OnLog?.Invoke($"[PLC ERROR] {headName} 回读校验失败: 写入={plcValue}, 读回={readBack}");
+                    OnLog?.Invoke($"[PLC ERROR] {headName} 回读校验失败: 写入={plcValue}, 读回={readBack} (低={readLow.Content}, 高={readHigh.Content})");
                     return false;
                 }
                 OnLog?.Invoke($"[PLC] {headName} 回读校验通过: {readBack}");
             }
             else
             {
-                OnLog?.Invoke($"[PLC WARN] {headName} 回读失败（写入可能成功）: {readBackResult.Message}");
-                // 回读失败不阻塞，继续置标志
+                OnLog?.Invoke($"[PLC WARN] {headName} 回读失败（写入可能成功）: 低={readLow.Message}, 高={readHigh.Message}");
             }
 
-            OnLog?.Invoke($"[PLC] {headName} 调整 {deltaMm:F5}mm (PLC值={plcValue}) 写入 {address}");
+            OnLog?.Invoke($"[PLC] {headName} 调整 {deltaMm:F5}mm (PLC值={plcValue}) 写入 {address}/{highAddress}");
 
             // 写入完成状态标志 = 1，通知 PLC 新偏移值已就绪
             var statusResult = await _plc.WriteAsync(statusAddress, (short)1);
@@ -228,5 +247,29 @@ public class KeyencePlcAdapter : IPlcAdapter, IDisposable
         {
             _nextReconnectAttemptUtc = DateTime.MinValue;
         }
+    }
+
+    /// <summary>
+    /// 将 PLC 寄存器地址 +1（如 "D9000" → "D9001"），用于访问 32 位值的高 16 位字。
+    /// </summary>
+    private static string IncrementAddress(string address)
+    {
+        // 找到数字部分的起始位置
+        int numStart = 0;
+        for (int i = 0; i < address.Length; i++)
+        {
+            if (char.IsDigit(address[i]))
+            {
+                numStart = i;
+                break;
+            }
+        }
+
+        string prefix = address[..numStart];
+        if (int.TryParse(address[numStart..], out int num))
+            return $"{prefix}{num + 1}";
+
+        // 解析失败时回退：直接拼 +1（不应发生）
+        return address + "+1";
     }
 }

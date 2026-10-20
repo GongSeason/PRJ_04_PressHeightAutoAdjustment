@@ -750,12 +750,12 @@
                         <TextBlock Text="压头A调整地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Plc.HeadAAdjustAddress, UpdateSourceTrigger=PropertyChanged}"
                                  Style="{StaticResource InputStyle}" Margin="0,0,0,10"
-                                 ToolTip="铆压#1 补偿值的写入寄存器（如 D100）。以 32 位浮点数写入，单位 mm。"/>
+                                 ToolTip="铆压#1 补偿值的写入寄存器（如 D9000）。以 32 位整数写入（mm×1000），占 2 个 D 字。"/>
 
                         <TextBlock Text="压头B调整地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Plc.HeadBAdjustAddress, UpdateSourceTrigger=PropertyChanged}"
                                  Style="{StaticResource InputStyle}" Margin="0,0,0,10"
-                                 ToolTip="铆压#2 补偿值的写入寄存器（如 D102）。以 32 位浮点数写入，单位 mm。"/>
+                                 ToolTip="铆压#2 补偿值的写入寄存器（如 D9002）。以 32 位整数写入（mm×1000），占 2 个 D 字。"/>
 
                         <TextBlock Text="压头A状态地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
                         <TextBox Text="{Binding Settings.Plc.HeadAStatusAddress, UpdateSourceTrigger=PropertyChanged}"
@@ -766,6 +766,16 @@
                         <TextBox Text="{Binding Settings.Plc.HeadBStatusAddress, UpdateSourceTrigger=PropertyChanged}"
                                  Style="{StaticResource InputStyle}" Margin="0,0,0,14"
                                  ToolTip="铆压#2 写入完成状态寄存器（如 D202）。PC 写入偏移值后置 1，PLC 取走后置 0。"/>
+
+                        <Border Height="1" Background="#FF2A2A2A" Margin="0,4,0,12"/>
+
+                        <TextBlock Text="运行模式" FontSize="13" FontWeight="Bold" Foreground="#FFB0B0B0" Margin="0,0,0,10"/>
+
+                        <CheckBox Content="节能模式" IsChecked="{Binding IsEnergySavingMode}"
+                                  Foreground="#FFFAFAFA" FontSize="13" Margin="0,0,0,6"
+                                  ToolTip="开启（默认）：Stable 状态不下发补偿值，仅 Drift 越界时下发。&#x0a;关闭：即使 Stable 状态也将微小偏差下发给 PLC，每次刷新都写入。"/>
+                        <TextBlock Text="关闭节能模式后，Stable 状态也会将微小偏差持续下发给 PLC"
+                                   FontSize="10" Foreground="#FF757575" TextWrapping="Wrap" Margin="20,0,0,14"/>
 
                         <Button Content="保存设置" Command="{Binding SaveSettingsCommand}"
                                 Style="{StaticResource IndustrialButton}" Width="268"

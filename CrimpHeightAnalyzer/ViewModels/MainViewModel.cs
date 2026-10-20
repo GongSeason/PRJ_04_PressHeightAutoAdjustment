@@ -50,6 +50,10 @@ public partial class MainViewModel : ObservableObject
     private int _headALastDriftSampleCount;
     private int _headBLastDriftSampleCount;
 
+    // 推荐值按钮防重复累加标志：写入 PLC 成功后置 false，允许再次点击
+    private bool _headARecommendationApplied;
+    private bool _headBRecommendationApplied;
+
     public MainViewModel()
     {
         LiveCharts.Configure(settings =>
@@ -128,6 +132,16 @@ public partial class MainViewModel : ObservableObject
 
     // 上下微调按钮的步进量 (mm)。
     private const double ManualDeltaStep = 0.001;
+
+    #endregion
+
+    #region 节能模式
+
+    /// <summary>
+    /// 节能模式：开启时 Stable 状态不下发（默认）；关闭时 Stable 也下发微小偏差。
+    /// </summary>
+    [ObservableProperty]
+    private bool isEnergySavingMode = true;
 
     #endregion
 
@@ -482,8 +496,8 @@ public partial class MainViewModel : ObservableObject
             var controlTimer = Stopwatch.StartNew();
             await SendPlcCommandsAsync(
                 currentDataTimestamp,
-                headAResult.Decision,
-                headBResult.Decision);
+                headAResult,
+                headBResult);
 
             controlTimer.Stop();
             controlMs = controlTimer.ElapsedMilliseconds;
@@ -549,7 +563,8 @@ public partial class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 将当前自动计算的调整量填入手动调整框，供用户参考或直接使用。
+    /// 推荐值按钮：将当前输入框值 + 自动计算偏差值合并后填入输入框。
+    /// 防重复累加：写入 PLC 成功后才允许再次点击。
     /// </summary>
     [RelayCommand]
     private void FillRecommended(string? headParam)
@@ -557,32 +572,68 @@ public partial class MainViewModel : ObservableObject
         if (!int.TryParse(headParam, out int headIndex) || headIndex is not (0 or 1))
             return;
 
-        double recommended = 0;
-        if (headIndex == 0 && _lastHeadADecision?.RequiresAction == true)
-            recommended = _lastHeadADecision.AdjustmentDelta;
-        else if (headIndex == 1 && _lastHeadBDecision?.RequiresAction == true)
-            recommended = _lastHeadBDecision.AdjustmentDelta;
-
         string headName = headIndex == 0 ? "铆压#1" : "铆压#2";
 
+        // 防重复累加：未写入 PLC 前不允许再次点击
+        bool alreadyApplied = headIndex == 0 ? _headARecommendationApplied : _headBRecommendationApplied;
+        if (alreadyApplied)
+        {
+            StatusText = $"{headName} 推荐值已填入，请先写入 PLC 后再次使用";
+            return;
+        }
+
+        // 获取自动计算的偏差调整量（无论 Stable 还是 Drift 都取理论值）
+        double autoDelta = 0;
+        var decision = headIndex == 0 ? _lastHeadADecision : _lastHeadBDecision;
+        if (decision != null)
+        {
+            if (decision.RequiresAction)
+            {
+                autoDelta = decision.AdjustmentDelta;
+            }
+            else
+            {
+                // Stable 状态也计算理论值供推荐
+                var lastResult = headIndex == 0 ? _lastHeadADecision : _lastHeadBDecision;
+                // 从最近的分析结果中取偏差，用控制律计算
+                // 这里直接用 R2RController 的逻辑：K × deviation，限幅
+                autoDelta = ComputeTheoreticalDelta(
+                    headIndex == 0
+                        ? double.TryParse(HeadADeviation.Replace("+", "").Replace(" mm", ""), out var devA) ? devA : 0
+                        : double.TryParse(HeadBDeviation.Replace("+", "").Replace(" mm", ""), out var devB) ? devB : 0);
+            }
+        }
+
+        double currentManual = headIndex == 0 ? HeadAManualDelta : HeadBManualDelta;
+        double combined = Math.Round(currentManual + autoDelta, 5);
+
         var result = MessageBox.Show(
-            $"确认将推荐值 {recommended:F5}mm 填入 {headName} 的手动调整框？",
+            $"确认将推荐值填入 {headName} 的手动调整框？\n" +
+            $"当前输入: {currentManual:F5}mm\n" +
+            $"自动偏差: {autoDelta:F5}mm\n" +
+            $"合计: {combined:F5}mm",
             "确认操作", MessageBoxButton.YesNo, MessageBoxImage.Question);
 
         if (result != MessageBoxResult.Yes)
         {
-            WriteLogToFile($"[操作] 用户取消填入推荐值 {headName} Δ={recommended:F5}mm");
+            WriteLogToFile($"[操作] 用户取消填入推荐值 {headName} 合计={combined:F5}mm");
             return;
         }
 
-        WriteLogToFile($"[操作] 用户确认填入推荐值 {headName} Δ={recommended:F5}mm");
+        WriteLogToFile($"[操作] 用户确认填入推荐值 {headName} 当前={currentManual:F5} + 自动={autoDelta:F5} = {combined:F5}mm");
 
         if (headIndex == 0)
-            HeadAManualDelta = Math.Round(recommended, 5);
+        {
+            HeadAManualDelta = combined;
+            _headARecommendationApplied = true;
+        }
         else
-            HeadBManualDelta = Math.Round(recommended, 5);
+        {
+            HeadBManualDelta = combined;
+            _headBRecommendationApplied = true;
+        }
 
-        StatusText = $"{headName} 推荐值已填入: {recommended:F5}mm";
+        StatusText = $"{headName} 推荐值已填入: {combined:F5}mm";
     }
 
     /// <summary>
@@ -678,17 +729,21 @@ public partial class MainViewModel : ObservableObject
                 // P0-2: 手动调整后也 bypass 旧数据
                 var currentDataTimestamp = _dataProvider?.LastDataTimestamp;
                 if (headIndex == 0)
+                {
                     _headAAdjustDataTimestamp = currentDataTimestamp;
+                    _headARecommendationApplied = false; // 写入成功，允许再次点击推荐值
+                    _headAArbiter.Reset();
+                }
                 else
+                {
                     _headBAdjustDataTimestamp = currentDataTimestamp;
+                    _headBRecommendationApplied = false;
+                    _headBArbiter.Reset();
+                }
 
                 SaveCompensationState();
 
-                // 清零输入框
-                if (headIndex == 0)
-                    HeadAManualDelta = 0;
-                else
-                    HeadBManualDelta = 0;
+                // 需求1: 手动输入框不清零，保持原值
 
                 // 更新累计补偿显示
                 HeadAAccumulatedCompensation = _headACompensation.Accumulated.ToString("F5");
@@ -696,12 +751,6 @@ public partial class MainViewModel : ObservableObject
 
                 StatusText = $"写入成功: {headName} Δ={manualDelta:F5}mm, 累计={plcValue:F5}mm，等待新数据...";
                 WriteLogToFile($"[手动写入] 成功，已设置 bypass 时间戳，等待 warmup");
-
-                // 重置对应压头的仲裁器漂移历史
-                if (headIndex == 0)
-                    _headAArbiter.Reset();
-                else
-                    _headBArbiter.Reset();
             }
             else
             {
@@ -739,65 +788,86 @@ public partial class MainViewModel : ObservableObject
 
     private async Task<(bool HeadASent, bool HeadBSent)> SendPlcCommandsAsync(
         DateTime? dataTimestamp,
-        HeadDecision headADecision,
-        HeadDecision headBDecision)
+        HeadAnalysisResult headAResult,
+        HeadAnalysisResult headBResult)
     {
         var plcAdapter = _plcAdapter;
         if (plcAdapter == null) return (false, false);
 
-        bool headASent = false;
-        bool headBSent = false;
-
-        // P0-1: 自动下发通过 CompensationTracker 累计，PLC 收到绝对补偿值
-        if (headADecision.RequiresAction)
-        {
-            double autoDelta = headADecision.AdjustmentDelta;
-            double previousAccumulated = _headACompensation.Accumulated;
-            _headACompensation.Apply(autoDelta);
-            double plcValue = _headACompensation.Accumulated;
-
-            WriteLogToFile($"[自动下发] 铆压#1: Δ={autoDelta:F5}mm, 累计={plcValue:F5}mm");
-            headASent = await plcAdapter.SendAdjustmentAsync(0, plcValue);
-            WriteLogToFile($"[自动下发] 铆压#1 结果: {(headASent ? "成功" : "失败")}");
-
-            if (headASent)
-            {
-                // P0-2: 记录调整时间戳，后续 bypass 旧数据
-                _headAAdjustDataTimestamp = dataTimestamp;
-                _headAArbiter.Reset();
-                SaveCompensationState();
-            }
-            else
-            {
-                // 写入失败回滚
-                _headACompensation.Reset(previousAccumulated);
-            }
-        }
-
-        if (headBDecision.RequiresAction)
-        {
-            double autoDelta = headBDecision.AdjustmentDelta;
-            double previousAccumulated = _headBCompensation.Accumulated;
-            _headBCompensation.Apply(autoDelta);
-            double plcValue = _headBCompensation.Accumulated;
-
-            WriteLogToFile($"[自动下发] 铆压#2: Δ={autoDelta:F5}mm, 累计={plcValue:F5}mm");
-            headBSent = await plcAdapter.SendAdjustmentAsync(1, plcValue);
-            WriteLogToFile($"[自动下发] 铆压#2 结果: {(headBSent ? "成功" : "失败")}");
-
-            if (headBSent)
-            {
-                _headBAdjustDataTimestamp = dataTimestamp;
-                _headBArbiter.Reset();
-                SaveCompensationState();
-            }
-            else
-            {
-                _headBCompensation.Reset(previousAccumulated);
-            }
-        }
+        bool headASent = await SendSingleHeadAsync(plcAdapter, 0, dataTimestamp, headAResult,
+            _headACompensation, _headAArbiter, v => _headAAdjustDataTimestamp = v);
+        bool headBSent = await SendSingleHeadAsync(plcAdapter, 1, dataTimestamp, headBResult,
+            _headBCompensation, _headBArbiter, v => _headBAdjustDataTimestamp = v);
 
         return (headASent, headBSent);
+    }
+
+    /// <summary>
+    /// 单个压头的自动下发逻辑。
+    /// 节能模式：仅 Drift 时下发；非节能模式：Stable 也下发微小偏差。
+    /// </summary>
+    private async Task<bool> SendSingleHeadAsync(
+        IPlcAdapter plcAdapter,
+        int headIndex,
+        DateTime? dataTimestamp,
+        HeadAnalysisResult result,
+        CompensationTracker tracker,
+        DecisionArbiter arbiter,
+        Action<DateTime?> setAdjustTimestamp)
+    {
+        var decision = result.Decision;
+        string headName = headIndex == 0 ? "铆压#1" : "铆压#2";
+
+        // 确定本次要下发的增量
+        double autoDelta;
+        bool shouldSend;
+
+        if (decision.RequiresAction)
+        {
+            // Drift 状态：使用仲裁结果
+            autoDelta = decision.AdjustmentDelta;
+            shouldSend = true;
+        }
+        else if (!IsEnergySavingMode && decision.State == HeadState.Stable)
+        {
+            // 非节能模式 + Stable：计算微小偏差（跳过死区，直接 K × deviation 限幅）
+            autoDelta = ComputeTheoreticalDelta(result.Deviation);
+            shouldSend = true;
+        }
+        else
+        {
+            // 节能模式 Stable 或 WarmUp：不下发
+            return false;
+        }
+
+        if (!shouldSend) return false;
+
+        double previousAccumulated = tracker.Accumulated;
+        tracker.Apply(autoDelta);
+        double plcValue = tracker.Accumulated;
+
+        string mode = decision.RequiresAction ? "Drift" : "Stable(非节能)";
+        WriteLogToFile($"[自动下发] {headName} [{mode}]: Δ={autoDelta:F5}mm, 累计={plcValue:F5}mm");
+        bool sent = await plcAdapter.SendAdjustmentAsync(headIndex, plcValue);
+        WriteLogToFile($"[自动下发] {headName} 结果: {(sent ? "成功" : "失败")}");
+
+        if (sent)
+        {
+            // Drift 下发成功：记录调整时间戳 bypass 旧数据 + 重置漂移历史
+            if (decision.RequiresAction)
+            {
+                setAdjustTimestamp(dataTimestamp);
+                arbiter.Reset();
+            }
+            // 非节能模式 Stable 下发不 bypass（不需要冷却期，每次都发）
+            SaveCompensationState();
+        }
+        else
+        {
+            tracker.Reset(previousAccumulated);
+        }
+
+        return sent;
     }
 
     /// <summary>

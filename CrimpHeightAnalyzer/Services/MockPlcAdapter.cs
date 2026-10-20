@@ -27,7 +27,8 @@ public class MockPlcAdapter : IPlcAdapter
             return Task.FromResult(false);
         }
 
-        OnLog?.Invoke($"[PLC Mock] {head} 调整 {deltaMm:F5}mm");
+        int plcIntValue = (int)Math.Round(deltaMm * 1000);
+        OnLog?.Invoke($"[PLC Mock] {head} 调整 {deltaMm:F5}mm (PLC值={plcIntValue})");
         // 置标志=1
         _statusFlags[idx] = 1;
         OnLog?.Invoke($"[PLC Mock] {head} 状态标志已置1");

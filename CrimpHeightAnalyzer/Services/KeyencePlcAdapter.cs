@@ -136,10 +136,10 @@ public class KeyencePlcAdapter : IPlcAdapter, IDisposable
                 return false;
             }
 
-            // 直接以浮点数写入 PLC 寄存器（32 位 float）
-            float plcValue = (float)deltaMm;
+            // 需求4: 写入 32 位整数（mm × 1000 取整），PLC 侧已改为接收整数
+            int plcValue = (int)Math.Round(deltaMm * 1000);
 
-            OnLog?.Invoke($"[PLC] {headName} 准备写入: 地址=\"{address}\", 值={plcValue}");
+            OnLog?.Invoke($"[PLC] {headName} 准备写入: 地址=\"{address}\", 值={plcValue} (原始={deltaMm:F5}mm × 1000)");
             var result = await _plc.WriteAsync(address, plcValue);
 
             if (!result.IsSuccess)
@@ -151,12 +151,12 @@ public class KeyencePlcAdapter : IPlcAdapter, IDisposable
                 return false;
             }
 
-            // P1-2: 回读校验
-            var readBackResult = await _plc.ReadFloatAsync(address);
+            // P1-2: 回读校验（int32）
+            var readBackResult = await _plc.ReadInt32Async(address);
             if (readBackResult.IsSuccess)
             {
-                float readBack = readBackResult.Content;
-                if (Math.Abs(readBack - plcValue) > 1e-6)
+                int readBack = readBackResult.Content;
+                if (readBack != plcValue)
                 {
                     OnLog?.Invoke($"[PLC ERROR] {headName} 回读校验失败: 写入={plcValue}, 读回={readBack}");
                     return false;
@@ -169,7 +169,7 @@ public class KeyencePlcAdapter : IPlcAdapter, IDisposable
                 // 回读失败不阻塞，继续置标志
             }
 
-            OnLog?.Invoke($"[PLC] {headName} 调整 {deltaMm:F5}mm 写入 {address}");
+            OnLog?.Invoke($"[PLC] {headName} 调整 {deltaMm:F5}mm (PLC值={plcValue}) 写入 {address}");
 
             // 写入完成状态标志 = 1，通知 PLC 新偏移值已就绪
             var statusResult = await _plc.WriteAsync(statusAddress, (short)1);

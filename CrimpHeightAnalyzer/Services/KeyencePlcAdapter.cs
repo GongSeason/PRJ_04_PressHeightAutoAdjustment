@@ -129,11 +129,19 @@ public class KeyencePlcAdapter : IPlcAdapter, IDisposable
             string headName = headIndex == 0 ? "压头A" : "压头B";
 
             // P1-2: 写入前检查状态标志，若仍为 1 则上一条指令未被 PLC 处理
-            var statusReadResult = await _plc.ReadInt16Async(statusAddress);
-            if (statusReadResult.IsSuccess && statusReadResult.Content != 0)
+            // BypassHandshake=true 时跳过此检查（测试用）
+            if (!_settings.BypassHandshake)
             {
-                OnLog?.Invoke($"[PLC] {headName} 跳过：上一条指令未被处理 (标志={statusReadResult.Content})");
-                return false;
+                var statusReadResult = await _plc.ReadInt16Async(statusAddress);
+                if (statusReadResult.IsSuccess && statusReadResult.Content != 0)
+                {
+                    OnLog?.Invoke($"[PLC] {headName} 跳过：上一条指令未被处理 (标志={statusReadResult.Content})");
+                    return false;
+                }
+            }
+            else
+            {
+                OnLog?.Invoke($"[PLC] {headName} 握手检查已跳过 (BypassHandshake=true)");
             }
 
             // 需求4: 写入有符号 32 位整数（mm × 1000 取整）

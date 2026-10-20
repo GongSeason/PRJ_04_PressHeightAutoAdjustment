@@ -775,7 +775,13 @@
                                   Foreground="#FFFAFAFA" FontSize="13" Margin="0,0,0,6"
                                   ToolTip="开启（默认）：Stable 状态不下发补偿值，仅 Drift 越界时下发。&#x0a;关闭：即使 Stable 状态也将微小偏差下发给 PLC，每次刷新都写入。"/>
                         <TextBlock Text="关闭节能模式后，Stable 状态也会将微小偏差持续下发给 PLC"
-                                   FontSize="10" Foreground="#FF757575" TextWrapping="Wrap" Margin="20,0,0,14"/>
+                                   FontSize="10" Foreground="#FF757575" TextWrapping="Wrap" Margin="20,0,0,10"/>
+
+                        <CheckBox Content="跳过握手检查" IsChecked="{Binding Settings.Plc.BypassHandshake}"
+                                  Foreground="#FFFAFAFA" FontSize="13" Margin="0,0,0,6"
+                                  ToolTip="不勾选（默认）：写入前检查 PLC 状态标志是否已清零，未清零则跳过本次写入。&#x0a;勾选：忽略握手检查，直接写入偏移值，用于 PLC 侧握手未就绪时的测试。"/>
+                        <TextBlock Text="测试用：勾选后忽略 PLC 握手标志检查，直接写入偏移值"
+                                   FontSize="10" Foreground="#FFFF8A80" TextWrapping="Wrap" Margin="20,0,0,14"/>
 
                         <Button Content="保存设置" Command="{Binding SaveSettingsCommand}"
                                 Style="{StaticResource IndustrialButton}" Width="268"

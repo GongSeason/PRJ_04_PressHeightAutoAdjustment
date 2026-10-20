@@ -66,4 +66,10 @@ public class PlcSettings
 
     /// <summary>重连间隔时间（毫秒）</summary>
     public int ReconnectIntervalMs { get; set; } = 10000;
+
+    /// <summary>
+    /// 跳过握手检查。默认 false（走正常握手：写入前检查标志是否为 0）。
+    /// 设为 true 时忽略握手，直接写偏移值 + 置标志=1，用于 PLC 侧握手未就绪时的测试。
+    /// </summary>
+    public bool BypassHandshake { get; set; } = false;
 }

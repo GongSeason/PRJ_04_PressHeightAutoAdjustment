@@ -60,9 +60,16 @@ public class CsvDataProvider : IDataProvider
                 ? " | ⚠ 文件无法打开"
                 : "";
 
+            // 外层总耗时 vs 内部子项之和，差值即为 Task.Run 调度延迟或 GC 暂停
+            long outerMs = readTimer.ElapsedMilliseconds;
+            long innerSum = openMs + readLinesMs + parseMs;
+            string scheduleTag = (outerMs - innerSum) > 100
+                ? $" | ⚠调度延迟={outerMs - innerSum}ms"
+                : "";
+
             LastReadDiagnostics = latestFile == null
                 ? $"定位 {locateTimer.ElapsedMilliseconds} ms | 未找到 CSV"
-                : $"定位 {locateTimer.ElapsedMilliseconds} ms | 尾读/解析 {readTimer.ElapsedMilliseconds} ms (打开={openMs} 倒读={readLinesMs} 解析={parseMs}) | 文件 {fileLength / 1024.0 / 1024.0:F1} MB | 实读 {bytesRead / 1024.0:F1} KB{fileLockedTag} | {Path.GetFileName(latestFile)}";
+                : $"定位 {locateTimer.ElapsedMilliseconds} ms | 尾读/解析 {outerMs} ms (打开={openMs} 倒读={readLinesMs} 解析={parseMs}) | 文件 {fileLength / 1024.0 / 1024.0:F1} MB | 实读 {bytesRead / 1024.0:F1} KB{fileLockedTag}{scheduleTag} | {Path.GetFileName(latestFile)}";
 
             if (allData.Count > 0)
                 LastDataTimestamp = allData[^1].RecordedAt;
@@ -245,30 +252,21 @@ public class CsvDataProvider : IDataProvider
 
         try
         {
-            // 估算需要读取的尾部字节数：每行约 100 字节，多取一些余量
+            // 总计时：覆盖 ParseFileFromEnd 内部全部代码，用于排查"幽灵耗时"
+            var totalInner = Stopwatch.StartNew();
+
             const int tailBuffer = 16;
             int totalLines = maxCount + tailBuffer;
-            int tailBytes = totalLines * 200; // 足够覆盖所需行数
+            int tailBytes = totalLines * 200;
 
-            // 第一步：尽快拿到尾部字节，立即关闭句柄
             var openTimer = Stopwatch.StartNew();
             byte[]? tailData = ReadTailBytesViaWin32(filePath, tailBytes, out long actualFileLength);
             openTimer.Stop();
             openMs = openTimer.ElapsedMilliseconds;
             fileLength = actualFileLength;
 
-            // Win32 方式失败（相机独占锁），回退到文件复制方式
-            if (tailData == null)
-            {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[CSV] Win32 读取失败 ({openMs}ms)，尝试复制方式: {Path.GetFileName(filePath)}");
-
-                openTimer.Restart();
-                tailData = ReadTailBytesViaCopy(filePath, tailBytes, out actualFileLength);
-                openTimer.Stop();
-                openMs += openTimer.ElapsedMilliseconds; // 累加两次尝试的时间
-                fileLength = actualFileLength;
-            }
+            // Win32 方式失败时（极少见），本次跳过，下个刷新周期重试
+            // 不再回退到 File.Copy（复制 6MB 文件本身就慢且同样可能被锁阻塞）
 
             if (tailData == null || tailData.Length == 0)
             {
@@ -303,8 +301,16 @@ public class CsvDataProvider : IDataProvider
             parseTimer.Stop();
             parseMs = parseTimer.ElapsedMilliseconds;
 
+            totalInner.Stop();
+            long innerTotalMs = totalInner.ElapsedMilliseconds;
+            long unaccounted = innerTotalMs - openMs - readLinesMs - parseMs;
+
             System.Diagnostics.Debug.WriteLine(
-                $"[CSV 诊断] 打开={openMs}ms | 倒读={readLinesMs}ms | 解析={parseMs}ms | 行数={lines.Count} | 有效={reversed.Count}");
+                $"[CSV 诊断] 内部总计={innerTotalMs}ms | 打开={openMs}ms | 倒读={readLinesMs}ms | 解析={parseMs}ms | 未计入={unaccounted}ms | 行数={lines.Count} | 有效={reversed.Count}");
+
+            // 把未计入的时间归到 openMs，让外层诊断信息能对上
+            if (unaccounted > 10)
+                openMs += unaccounted;
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
@@ -317,8 +323,9 @@ public class CsvDataProvider : IDataProvider
     }
 
     /// <summary>
-    /// 用 Win32 CreateFile 打开文件，只读末尾 tailBytes 字节到内存，立即关闭句柄。
-    /// 整个"打开→读→关闭"在一个方法内完成，最小化持有句柄的时间。
+    /// 用 Win32 CreateFile 打开文件，只读末尾 tailBytes 字节到内存。
+    /// 关键：CreateFile 和 Read 都可能快速完成，但 CloseHandle 可能因 oplock break 阻塞数秒。
+    /// 所以把 Close 放到后台线程，主线程拿到数据后立即返回。
     /// </summary>
     private static byte[]? ReadTailBytesViaWin32(string filePath, int tailBytes, out long fileLength)
     {
@@ -331,7 +338,10 @@ public class CsvDataProvider : IDataProvider
                 return null;
 
             if (!GetFileSizeEx(handle, out fileLength) || fileLength == 0)
+            {
+                CloseHandleInBackground(handle);
                 return null;
+            }
 
             long readStart = Math.Max(0, fileLength - tailBytes);
             int readSize = (int)(fileLength - readStart);
@@ -339,9 +349,9 @@ public class CsvDataProvider : IDataProvider
 
             int actualRead = RandomAccess.Read(handle, buffer.AsSpan(), readStart);
 
-            // 立即关闭句柄，不等 using/Dispose 延迟
-            handle.Close();
-            handle = null;
+            // 关键：Close 可能阻塞数秒（oplock break），放到后台线程不等它
+            CloseHandleInBackground(handle);
+            handle = null; // 防止 finally 重复关闭
 
             if (actualRead < readSize)
                 return buffer[..actualRead];
@@ -350,63 +360,39 @@ public class CsvDataProvider : IDataProvider
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[CSV] Win32 读取异常: {ex.Message}");
-            return null;
-        }
-        finally
-        {
-            // 确保句柄被关闭
             if (handle != null && !handle.IsInvalid && !handle.IsClosed)
-            {
-                try { handle.Close(); } catch { }
-            }
+                CloseHandleInBackground(handle);
+            return null;
         }
     }
 
     /// <summary>
-    /// 回退方案：用 File.Copy 把文件快照到临时文件，再读临时文件的尾部。
-    /// Windows 的 CopyFile API 即使源文件被独占锁定，在大多数情况下仍能成功
-    /// （它走内核的 cached read path，不需要获取用户态文件句柄）。
+    /// 在后台线程关闭文件句柄，避免 CloseHandle 的 oplock break 等待阻塞主流程。
+    /// 安全性说明：
+    /// - 句柄是只读 + 最大共享模式打开的，持有期间不影响相机写入。
+    /// - 后台线程最终会完成关闭，不会泄漏。
+    /// - _pendingCloses 计数器防止极端情况下句柄积压过多。
     /// </summary>
-    private static byte[]? ReadTailBytesViaCopy(string filePath, int tailBytes, out long fileLength)
+    private static int _pendingCloses;
+    private const int MaxPendingCloses = 5;
+
+    private static void CloseHandleInBackground(SafeFileHandle handle)
     {
-        fileLength = 0;
-        string tempFile = Path.Combine(Path.GetTempPath(), $"crimp_csv_{Guid.NewGuid():N}.tmp");
-        try
+        int pending = Interlocked.Increment(ref _pendingCloses);
+        if (pending > MaxPendingCloses)
         {
-            // File.Copy 内部调用 Win32 CopyFile，能绕过大多数用户态文件锁
-            File.Copy(filePath, tempFile, overwrite: true);
-
-            var fi = new FileInfo(tempFile);
-            fileLength = fi.Length;
-            if (fileLength == 0) return null;
-
-            using var fs = new FileStream(tempFile, FileMode.Open, FileAccess.Read,
-                FileShare.None, 4096, FileOptions.SequentialScan | FileOptions.DeleteOnClose);
-
-            long readStart = Math.Max(0, fileLength - tailBytes);
-            int readSize = (int)(fileLength - readStart);
-            var buffer = new byte[readSize];
-
-            fs.Seek(readStart, SeekOrigin.Begin);
-            int totalRead = 0;
-            while (totalRead < readSize)
-            {
-                int read = fs.Read(buffer, totalRead, readSize - totalRead);
-                if (read == 0) break;
-                totalRead += read;
-            }
-
-            return totalRead < readSize ? buffer[..totalRead] : buffer;
+            // 积压过多，同步关闭，宁可慢一次也不泄漏
+            Interlocked.Decrement(ref _pendingCloses);
+            try { handle.Close(); } catch { }
+            return;
         }
-        catch (Exception ex)
+
+        Task.Run(() =>
         {
-            System.Diagnostics.Debug.WriteLine($"[CSV] 复制方式读取失败: {ex.Message}");
-            return null;
-        }
-        finally
-        {
-            try { if (File.Exists(tempFile)) File.Delete(tempFile); } catch { }
-        }
+            try { handle.Close(); }
+            catch { /* 关闭失败不影响主流程 */ }
+            finally { Interlocked.Decrement(ref _pendingCloses); }
+        });
     }
 
     /// <summary>

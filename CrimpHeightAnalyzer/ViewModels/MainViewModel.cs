@@ -50,6 +50,10 @@ public partial class MainViewModel : ObservableObject
     private bool _headARecommendationApplied;
     private bool _headBRecommendationApplied;
 
+    // WarmUp 时沿用上次的有效偏差值，避免截尾均值=0 导致图表突变尖刺
+    private double _lastValidHeadADeviation;
+    private double _lastValidHeadBDeviation;
+
     public MainViewModel()
     {
         LiveCharts.Configure(settings =>
@@ -498,13 +502,28 @@ public partial class MainViewModel : ObservableObject
                 UpdateHeadBResults(headBResult);
                 UpdateAlerts(alerts);
                 UpdateCharts(_currentData);
-                // 补偿图表绘制理论调整值（K × deviation 限幅），始终有波动
+
+                // WarmUp 时截尾均值为 0，偏差 = 0 - TargetMidpoint 是假值，
+                // 绘制会产生突变尖刺。此时沿用上次的偏差值保持折线连续。
+                double headADeviation = headAResult.Decision.State == HeadState.WarmUp
+                    ? _lastValidHeadADeviation
+                    : headAResult.Deviation;
+                double headBDeviation = headBResult.Decision.State == HeadState.WarmUp
+                    ? _lastValidHeadBDeviation
+                    : headBResult.Deviation;
+
+                // 记住有效偏差值供下次 WarmUp 时使用
+                if (headAResult.Decision.State != HeadState.WarmUp)
+                    _lastValidHeadADeviation = headAResult.Deviation;
+                if (headBResult.Decision.State != HeadState.WarmUp)
+                    _lastValidHeadBDeviation = headBResult.Deviation;
+
                 AppendCompensationPoint(
-                    ComputeTheoreticalDelta(headAResult.Deviation),
-                    ComputeTheoreticalDelta(headBResult.Deviation));
+                    ComputeTheoreticalDelta(headADeviation),
+                    ComputeTheoreticalDelta(headBDeviation));
                 // 更新当前下发值显示：M + N
-                double headAAutoN = ComputeTheoreticalDelta(headAResult.Deviation);
-                double headBAutoN = ComputeTheoreticalDelta(headBResult.Deviation);
+                double headAAutoN = ComputeTheoreticalDelta(headADeviation);
+                double headBAutoN = ComputeTheoreticalDelta(headBDeviation);
                 HeadAAccumulatedCompensation = (HeadAManualDelta + headAAutoN).ToString("F5");
                 HeadBAccumulatedCompensation = (HeadBManualDelta + headBAutoN).ToString("F5");
                 StatusText = $"数据加载完成 - {_currentData.Count}条记录";

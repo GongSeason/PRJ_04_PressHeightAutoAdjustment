@@ -121,9 +121,10 @@ public class CsvDataProvider : IDataProvider
             // 第二步：读取尾部字节（句柄已打开，只做 GetFileSizeEx + Read，极快）
             var readTimer2 = Stopwatch.StartNew();
 
-            if (!GetFileSizeEx(handle, out fileLength) || fileLength == 0)
+            // 用路径查实时文件大小，不用句柄查（句柄常驻时 GetFileSizeEx 可能返回缓存旧值）
+            fileLength = GetRealFileSize(filePath);
+            if (fileLength <= 0)
             {
-                // GetFileSizeEx 失败说明句柄可能已失效，清除缓存下次重新打开
                 InvalidateCachedHandle();
                 return reversed;
             }
@@ -262,6 +263,37 @@ public class CsvDataProvider : IDataProvider
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetFileSizeEx(SafeFileHandle hFile, out long lpFileSize);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool GetFileAttributesEx(
+        string lpFileName,
+        int fInfoLevelId,
+        out WIN32_FILE_ATTRIBUTE_DATA fileData);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WIN32_FILE_ATTRIBUTE_DATA
+    {
+        public uint dwFileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME ftCreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME ftLastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME ftLastWriteTime;
+        public uint nFileSizeHigh;
+        public uint nFileSizeLow;
+    }
+
+    /// <summary>
+    /// 通过文件路径获取实时文件大小，不依赖已有句柄。
+    /// 句柄常驻时 GetFileSizeEx 可能返回缓存的旧值，
+    /// 而 GetFileAttributesEx 每次都查询文件系统元数据，能看到相机最新写入后的真实大小。
+    /// </summary>
+    private static long GetRealFileSize(string filePath)
+    {
+        if (GetFileAttributesEx(filePath, 0, out var data))
+        {
+            return ((long)data.nFileSizeHigh << 32) | data.nFileSizeLow;
+        }
+        return -1;
+    }
 
     private const uint GENERIC_READ = 0x80000000;
     private const uint FILE_SHARE_READ_WRITE_DELETE = 0x00000001 | 0x00000002 | 0x00000004;

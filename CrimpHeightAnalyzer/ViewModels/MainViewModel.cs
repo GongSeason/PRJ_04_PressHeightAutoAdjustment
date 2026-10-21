@@ -423,7 +423,10 @@ public partial class MainViewModel : ObservableObject
                 data = data.Where(d => d.RecordedAt.HasValue && d.RecordedAt.Value >= _resetTimestamp.Value).ToList();
 
             _currentData = data;
-            PerformanceText = $"CSV {csvMs} ms | {_dataProvider.LastReadDiagnostics} | 有效 {data.Count} 条";
+            // 诊断：打印首尾时间戳，确认每次读到的数据是否真的不同
+            string firstTs = data.Count > 0 ? data[0].Timestamp : "无";
+            string lastTs = data.Count > 0 ? data[^1].Timestamp : "无";
+            PerformanceText = $"CSV {csvMs} ms | {_dataProvider.LastReadDiagnostics} | 有效 {data.Count} 条 | 首={firstTs} 尾={lastTs}";
 
             if (_currentData.Count == 0 || !_currentData.Any(d => d.IsValid))
             {

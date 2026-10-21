@@ -47,15 +47,16 @@ public class CsvDataProvider : IDataProvider
 
             long bytesRead = 0;
             int fallbackTimestampCount = 0;
+            long openMs = 0, readLinesMs = 0, parseMs = 0;
             var readTimer = Stopwatch.StartNew();
             var allData = latestFile != null
-                ? ParseFileFromEnd(latestFile, count, cancellationToken, out bytesRead, out fallbackTimestampCount)
+                ? ParseFileFromEnd(latestFile, count, cancellationToken, out bytesRead, out fallbackTimestampCount, out openMs, out readLinesMs, out parseMs)
                 : new List<CrimpData>();
             readTimer.Stop();
 
             LastReadDiagnostics = latestFile == null
                 ? $"定位 {locateTimer.ElapsedMilliseconds} ms | 未找到 CSV"
-                : $"定位 {locateTimer.ElapsedMilliseconds} ms | 尾读/解析 {readTimer.ElapsedMilliseconds} ms | 文件 {fileLength / 1024.0 / 1024.0:F1} MB | 实读 {bytesRead / 1024.0:F1} KB | 时间戳回退 {fallbackTimestampCount} 行 | {Path.GetFileName(latestFile)}";
+                : $"定位 {locateTimer.ElapsedMilliseconds} ms | 尾读/解析 {readTimer.ElapsedMilliseconds} ms (打开={openMs} 倒读={readLinesMs} 解析={parseMs}) | 文件 {fileLength / 1024.0 / 1024.0:F1} MB | 实读 {bytesRead / 1024.0:F1} KB | 时间戳回退 {fallbackTimestampCount} 行 | {Path.GetFileName(latestFile)}";
 
             LastDataTimestamp = allData.Count > 0 ? allData[^1].RecordedAt : null;
 
@@ -189,34 +190,49 @@ public class CsvDataProvider : IDataProvider
         int maxCount,
         CancellationToken cancellationToken,
         out long bytesRead,
-        out int fallbackTimestampCount)
+        out int fallbackTimestampCount,
+        out long openMs,
+        out long readLinesMs,
+        out long parseMs)
     {
         bytesRead = 0;
         fallbackTimestampCount = 0;
+        openMs = 0;
+        readLinesMs = 0;
+        parseMs = 0;
         // 倒序收集：集满 maxCount 即停止；末尾为最新，稍后整体反转成正序。
         var reversed = new List<CrimpData>(maxCount);
         DateTime? fallbackRecordedAt = null;
 
         try
         {
-            // 使用 FileStream 并指定 FileShare.ReadWrite 允许其他进程同时写入
+            // FileOptions.RandomAccess 告知 OS 不做顺序预读，只读末尾数 KB。
+            var openTimer = Stopwatch.StartNew();
             using var fileStream = new FileStream(
                 filePath,
                 FileMode.Open,
                 FileAccess.Read,
-                FileShare.ReadWrite  // 关键：允许其他进程写入
+                FileShare.ReadWrite,
+                bufferSize: 4096,
+                FileOptions.RandomAccess
             );
+            openTimer.Stop();
+            openMs = openTimer.ElapsedMilliseconds;
 
             // 倒读上限 = 所需条数 + 缓冲。缓冲用于吸收：可能被丢弃的半截末行、
             // 末尾偶发的无效行（高度=0 的预热段等）。只读末尾这么多行即停，
             // 不再读到文件头，使单次开销与文件总大小（可达数十万行）解耦。
             const int tailBuffer = 16;
+            var readTimer2 = Stopwatch.StartNew();
             var lines = ReadLinesFromEnd(fileStream, maxCount + tailBuffer, cancellationToken, out bytesRead);
+            readTimer2.Stop();
+            readLinesMs = readTimer2.ElapsedMilliseconds;
 
             // 末行若未以换行结束，视为正在写入的半条记录，丢弃不解析。
             if (lines.Count > 0 && !EndsWithLineTerminator(fileStream))
                 lines.RemoveAt(0);
 
+            var parseTimer = Stopwatch.StartNew();
             foreach (var line in lines)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -231,6 +247,11 @@ public class CsvDataProvider : IDataProvider
                 if (data != null)
                     reversed.Add(data);
             }
+            parseTimer.Stop();
+            parseMs = parseTimer.ElapsedMilliseconds;
+
+            System.Diagnostics.Debug.WriteLine(
+                $"[CSV 诊断] 打开={openMs}ms | 倒读={readLinesMs}ms | 解析={parseMs}ms | 行数={lines.Count} | 有效={reversed.Count}");
         }
         catch (OperationCanceledException)
         {

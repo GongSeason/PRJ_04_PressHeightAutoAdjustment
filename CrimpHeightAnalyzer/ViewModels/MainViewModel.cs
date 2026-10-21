@@ -38,10 +38,6 @@ public partial class MainViewModel : ObservableObject
     private HeadDecision? _lastHeadBDecision;
     private DateTime? _resetTimestamp;
 
-    // P0-1: 累计补偿追踪器（手动+自动共用）
-    private readonly CompensationTracker _headACompensation = new();
-    private readonly CompensationTracker _headBCompensation = new();
-
     // P0-2: 每个压头独立的调整时间戳（数据时间轴），用于 bypass 旧数据
     private DateTime? _headAAdjustDataTimestamp;
     private DateTime? _headBAdjustDataTimestamp;
@@ -61,10 +57,8 @@ public partial class MainViewModel : ObservableObject
 
         Settings = _settingsService.Load();
 
-        // P0-1: 从持久化文件恢复累计补偿值和手动偏差值
+        // 从持久化文件恢复手动偏差值
         var compensationState = _compensationStateService.Load();
-        _headACompensation.Reset(compensationState.HeadAAccumulated);
-        _headBCompensation.Reset(compensationState.HeadBAccumulated);
         HeadAManualDelta = compensationState.HeadAManualDelta;
         HeadBManualDelta = compensationState.HeadBManualDelta;
 
@@ -508,9 +502,11 @@ public partial class MainViewModel : ObservableObject
                 AppendCompensationPoint(
                     ComputeTheoreticalDelta(headAResult.Deviation),
                     ComputeTheoreticalDelta(headBResult.Deviation));
-                // P0-1: 更新累计补偿显示
-                HeadAAccumulatedCompensation = _headACompensation.Accumulated.ToString("F5");
-                HeadBAccumulatedCompensation = _headBCompensation.Accumulated.ToString("F5");
+                // 更新当前下发值显示：M + N
+                double headAAutoN = ComputeTheoreticalDelta(headAResult.Deviation);
+                double headBAutoN = ComputeTheoreticalDelta(headBResult.Deviation);
+                HeadAAccumulatedCompensation = (HeadAManualDelta + headAAutoN).ToString("F5");
+                HeadBAccumulatedCompensation = (HeadBManualDelta + headBAutoN).ToString("F5");
                 StatusText = $"数据加载完成 - {_currentData.Count}条记录";
                 IsLoading = false;
             });
@@ -706,14 +702,11 @@ public partial class MainViewModel : ObservableObject
 
         try
         {
-            // P0-1: 手动调整也通过 CompensationTracker，PLC 收到累计绝对补偿值
-            var tracker = headIndex == 0 ? _headACompensation : _headBCompensation;
-            double previousAccumulated = tracker.Accumulated;
-            tracker.Apply(manualDelta);
-            double plcValue = tracker.Accumulated;
+            // 手动写入：直接写 M（手动偏差值），不累加
+            double plcValue = manualDelta;
 
-            StatusText = $"正在写入 {headName}: Δ={manualDelta:F5}mm, 累计={plcValue:F5}mm ...";
-            WriteLogToFile($"[手动写入] 调用 SendAdjustmentAsync({headIndex}, {plcValue:F5}) (Δ={manualDelta:F5}, 累计={plcValue:F5})");
+            StatusText = $"正在写入 {headName}: M={plcValue:F5}mm ...";
+            WriteLogToFile($"[手动写入] 调用 SendAdjustmentAsync({headIndex}, {plcValue:F5}) (M={manualDelta:F5})");
             bool ok = await plcAdapter.SendAdjustmentAsync(headIndex, plcValue);
             WriteLogToFile($"[手动写入] SendAdjustmentAsync 返回: {ok}");
             if (ok)
@@ -735,19 +728,11 @@ public partial class MainViewModel : ObservableObject
 
                 SaveCompensationState();
 
-                // 需求1: 手动输入框不清零，保持原值
-
-                // 更新累计补偿显示
-                HeadAAccumulatedCompensation = _headACompensation.Accumulated.ToString("F5");
-                HeadBAccumulatedCompensation = _headBCompensation.Accumulated.ToString("F5");
-
-                StatusText = $"写入成功: {headName} Δ={manualDelta:F5}mm, 累计={plcValue:F5}mm，等待新数据...";
+                StatusText = $"写入成功: {headName} M={plcValue:F5}mm，等待新数据...";
                 WriteLogToFile($"[手动写入] 成功，已设置 bypass 时间戳，等待 warmup");
             }
             else
             {
-                // 写入失败回滚
-                tracker.Reset(previousAccumulated);
                 StatusText = $"写入失败: {headName} 未能写入 PLC（检查连接/地址）";
             }
         }
@@ -787,15 +772,16 @@ public partial class MainViewModel : ObservableObject
         if (plcAdapter == null) return (false, false);
 
         bool headASent = await SendSingleHeadAsync(plcAdapter, 0, dataTimestamp, headAResult,
-            _headACompensation, _headAArbiter, v => _headAAdjustDataTimestamp = v);
+            _headAArbiter, v => _headAAdjustDataTimestamp = v);
         bool headBSent = await SendSingleHeadAsync(plcAdapter, 1, dataTimestamp, headBResult,
-            _headBCompensation, _headBArbiter, v => _headBAdjustDataTimestamp = v);
+            _headBArbiter, v => _headBAdjustDataTimestamp = v);
 
         return (headASent, headBSent);
     }
 
     /// <summary>
     /// 单个压头的自动下发逻辑。
+    /// PLC 收到的值 = M(手动偏差) + N(自动计算偏差)，不累加历史。
     /// 节能模式：仅 Drift 时下发；非节能模式：Stable 也下发微小偏差。
     /// </summary>
     private async Task<bool> SendSingleHeadAsync(
@@ -803,14 +789,14 @@ public partial class MainViewModel : ObservableObject
         int headIndex,
         DateTime? dataTimestamp,
         HeadAnalysisResult result,
-        CompensationTracker tracker,
         DecisionArbiter arbiter,
         Action<DateTime?> setAdjustTimestamp)
     {
         var decision = result.Decision;
         string headName = headIndex == 0 ? "铆压#1" : "铆压#2";
+        double manualDelta = headIndex == 0 ? HeadAManualDelta : HeadBManualDelta;
 
-        // 确定本次要下发的增量
+        // 确定本次自动调整量 N
         double autoDelta;
         bool shouldSend;
 
@@ -834,12 +820,11 @@ public partial class MainViewModel : ObservableObject
 
         if (!shouldSend) return false;
 
-        double previousAccumulated = tracker.Accumulated;
-        tracker.Apply(autoDelta);
-        double plcValue = tracker.Accumulated;
+        // PLC 收到的值 = M(手动偏差) + N(自动偏差)，不累加
+        double plcValue = manualDelta + autoDelta;
 
         string mode = decision.RequiresAction ? "Drift" : "Stable(非节能)";
-        WriteLogToFile($"[自动下发] {headName} [{mode}]: Δ={autoDelta:F5}mm, 累计={plcValue:F5}mm");
+        WriteLogToFile($"[自动下发] {headName} [{mode}]: M={manualDelta:F5} + N={autoDelta:F5} = {plcValue:F5}mm");
         bool sent = await plcAdapter.SendAdjustmentAsync(headIndex, plcValue);
         WriteLogToFile($"[自动下发] {headName} 结果: {(sent ? "成功" : "失败")}");
 
@@ -852,11 +837,6 @@ public partial class MainViewModel : ObservableObject
                 arbiter.Reset();
             }
             // 非节能模式 Stable 下发不 bypass（不需要冷却期，每次都发）
-            SaveCompensationState();
-        }
-        else
-        {
-            tracker.Reset(previousAccumulated);
         }
 
         return sent;
@@ -869,8 +849,6 @@ public partial class MainViewModel : ObservableObject
     {
         _compensationStateService.Save(new CompensationState
         {
-            HeadAAccumulated = _headACompensation.Accumulated,
-            HeadBAccumulated = _headBCompensation.Accumulated,
             HeadAManualDelta = HeadAManualDelta,
             HeadBManualDelta = HeadBManualDelta,
             LastSavedAt = DateTime.Now

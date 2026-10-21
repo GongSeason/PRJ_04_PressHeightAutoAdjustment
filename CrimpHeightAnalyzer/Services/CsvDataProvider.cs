@@ -40,12 +40,9 @@ public class CsvDataProvider : IDataProvider
             var latestFile = GetLatestCsvFile();
             locateTimer.Stop();
 
+            // 注意：不再在这里用 FileInfo 取文件大小（它也会触发 oplock）。
+            // 文件大小在 ParseFileFromEnd 内部通过 Win32 GetFileSizeEx 获取。
             long fileLength = 0;
-            if (latestFile != null)
-            {
-                try { fileLength = new FileInfo(latestFile).Length; }
-                catch { /* 文件可能正被轮转 */ }
-            }
 
             long bytesRead = 0;
             int fallbackTimestampCount = 0;
@@ -54,7 +51,8 @@ public class CsvDataProvider : IDataProvider
             var allData = latestFile != null
                 ? ParseFileFromEnd(latestFile, count, cancellationToken,
                     out bytesRead, out fallbackTimestampCount,
-                    out openMs, out readLinesMs, out parseMs)
+                    out openMs, out readLinesMs, out parseMs,
+                    out fileLength)
                 : new List<CrimpData>();
             readTimer.Stop();
 
@@ -220,8 +218,10 @@ public class CsvDataProvider : IDataProvider
     #endregion
 
     /// <summary>
-    /// 从文件末尾向前读取，使用 Win32 CreateFile + RandomAccess API。
-    /// 不触发 oplock，相机写入时也能即时读取。
+    /// 从文件末尾向前读取。
+    /// 策略：用 Win32 CreateFile 打开 → 只读末尾 tailBytes 字节到内存 → 立即关闭句柄 → 在内存中解析。
+    /// 关键：把"持有文件句柄"的时间压到最短（只读一次 Read），避免 CloseHandle 时的 oplock 等待。
+    /// 如果 CreateFile 本身被阻塞（相机不允许共享读），则回退到 robocopy 快照方式。
     /// </summary>
     private static List<CrimpData> ParseFileFromEnd(
         string filePath,
@@ -231,41 +231,61 @@ public class CsvDataProvider : IDataProvider
         out int fallbackTimestampCount,
         out long openMs,
         out long readLinesMs,
-        out long parseMs)
+        out long parseMs,
+        out long fileLength)
     {
         bytesRead = 0;
         fallbackTimestampCount = 0;
         openMs = 0;
         readLinesMs = 0;
         parseMs = 0;
+        fileLength = 0;
         var reversed = new List<CrimpData>(maxCount);
         DateTime? fallbackRecordedAt = null;
 
         try
         {
+            // 估算需要读取的尾部字节数：每行约 100 字节，多取一些余量
+            const int tailBuffer = 16;
+            int totalLines = maxCount + tailBuffer;
+            int tailBytes = totalLines * 200; // 足够覆盖所需行数
+
+            // 第一步：尽快拿到尾部字节，立即关闭句柄
             var openTimer = Stopwatch.StartNew();
-            using var handle = OpenFileNoOplock(filePath);
+            byte[]? tailData = ReadTailBytesViaWin32(filePath, tailBytes, out long actualFileLength);
             openTimer.Stop();
             openMs = openTimer.ElapsedMilliseconds;
+            fileLength = actualFileLength;
 
-            if (handle == null || handle.IsInvalid)
+            // Win32 方式失败（相机独占锁），回退到文件复制方式
+            if (tailData == null)
             {
                 System.Diagnostics.Debug.WriteLine(
-                    $"[CSV] 无法打开文件 ({openMs}ms): {Path.GetFileName(filePath)}");
+                    $"[CSV] Win32 读取失败 ({openMs}ms)，尝试复制方式: {Path.GetFileName(filePath)}");
+
+                openTimer.Restart();
+                tailData = ReadTailBytesViaCopy(filePath, tailBytes, out actualFileLength);
+                openTimer.Stop();
+                openMs += openTimer.ElapsedMilliseconds; // 累加两次尝试的时间
+                fileLength = actualFileLength;
+            }
+
+            if (tailData == null || tailData.Length == 0)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[CSV] 无法读取文件 ({openMs}ms): {Path.GetFileName(filePath)}");
                 return reversed;
             }
 
-            if (!GetFileSizeEx(handle, out long fileLength) || fileLength == 0)
-                return reversed;
+            bytesRead = tailData.Length;
 
-            const int tailBuffer = 16;
+            // 第二步：在内存中解析行（不再持有任何文件句柄）
             var readTimer2 = Stopwatch.StartNew();
-            var lines = ReadLinesFromEnd(handle, fileLength, maxCount + tailBuffer, cancellationToken, out bytesRead);
+            bool endsWithNewline = tailData.Length > 0
+                && (tailData[^1] == (byte)'\n' || tailData[^1] == (byte)'\r');
+            var lines = ExtractLinesFromTail(tailData, totalLines, endsWithNewline);
             readTimer2.Stop();
             readLinesMs = readTimer2.ElapsedMilliseconds;
-
-            if (lines.Count > 0 && !EndsWithLineTerminator(handle, fileLength))
-                lines.RemoveAt(0);
 
             var parseTimer = Stopwatch.StartNew();
             foreach (var line in lines)
@@ -287,10 +307,6 @@ public class CsvDataProvider : IDataProvider
                 $"[CSV 诊断] 打开={openMs}ms | 倒读={readLinesMs}ms | 解析={parseMs}ms | 行数={lines.Count} | 有效={reversed.Count}");
         }
         catch (OperationCanceledException) { throw; }
-        catch (IOException ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[CSV] IO异常: {Path.GetFileName(filePath)}: {ex.Message}");
-        }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[CSV] 读取失败 {Path.GetFileName(filePath)}: {ex.Message}");
@@ -301,72 +317,136 @@ public class CsvDataProvider : IDataProvider
     }
 
     /// <summary>
-    /// 基于 SafeFileHandle + RandomAccess 从文件末尾向前逐行读取。
-    /// 不构造 FileStream，不触发 oplock，相机写入时也能即时读取。
+    /// 用 Win32 CreateFile 打开文件，只读末尾 tailBytes 字节到内存，立即关闭句柄。
+    /// 整个"打开→读→关闭"在一个方法内完成，最小化持有句柄的时间。
     /// </summary>
-    private static List<string> ReadLinesFromEnd(
-        SafeFileHandle handle,
-        long fileLength,
-        int maxLines,
-        CancellationToken cancellationToken,
-        out long bytesRead)
+    private static byte[]? ReadTailBytesViaWin32(string filePath, int tailBytes, out long fileLength)
     {
-        bytesRead = 0;
-        var lines = new List<string>();
-        if (maxLines <= 0 || fileLength == 0) return lines;
-
-        const int bufferSize = 8192;
-        var buffer = new byte[bufferSize];
-        long position = fileLength;
-        var pending = new List<byte>();
-
-        while (position > 0 && lines.Count < maxLines)
+        fileLength = 0;
+        SafeFileHandle? handle = null;
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            handle = OpenFileNoOplock(filePath);
+            if (handle == null || handle.IsInvalid)
+                return null;
 
-            int readSize = (int)Math.Min(bufferSize, position);
-            position -= readSize;
+            if (!GetFileSizeEx(handle, out fileLength) || fileLength == 0)
+                return null;
 
-            int actualRead = RandomAccess.Read(handle, buffer.AsSpan(0, readSize), position);
-            bytesRead += actualRead;
-            if (actualRead == 0) break;
+            long readStart = Math.Max(0, fileLength - tailBytes);
+            int readSize = (int)(fileLength - readStart);
+            var buffer = new byte[readSize];
 
-            for (int i = actualRead - 1; i >= 0; i--)
+            int actualRead = RandomAccess.Read(handle, buffer.AsSpan(), readStart);
+
+            // 立即关闭句柄，不等 using/Dispose 延迟
+            handle.Close();
+            handle = null;
+
+            if (actualRead < readSize)
+                return buffer[..actualRead];
+            return buffer;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[CSV] Win32 读取异常: {ex.Message}");
+            return null;
+        }
+        finally
+        {
+            // 确保句柄被关闭
+            if (handle != null && !handle.IsInvalid && !handle.IsClosed)
             {
-                byte b = buffer[i];
-                if (b == (byte)'\n')
-                {
-                    lines.Add(DecodeReversed(pending));
-                    pending.Clear();
-                    if (lines.Count >= maxLines)
-                        break;
-                }
-                else if (b != (byte)'\r')
-                {
-                    pending.Add(b);
-                }
+                try { handle.Close(); } catch { }
             }
+        }
+    }
+
+    /// <summary>
+    /// 回退方案：用 File.Copy 把文件快照到临时文件，再读临时文件的尾部。
+    /// Windows 的 CopyFile API 即使源文件被独占锁定，在大多数情况下仍能成功
+    /// （它走内核的 cached read path，不需要获取用户态文件句柄）。
+    /// </summary>
+    private static byte[]? ReadTailBytesViaCopy(string filePath, int tailBytes, out long fileLength)
+    {
+        fileLength = 0;
+        string tempFile = Path.Combine(Path.GetTempPath(), $"crimp_csv_{Guid.NewGuid():N}.tmp");
+        try
+        {
+            // File.Copy 内部调用 Win32 CopyFile，能绕过大多数用户态文件锁
+            File.Copy(filePath, tempFile, overwrite: true);
+
+            var fi = new FileInfo(tempFile);
+            fileLength = fi.Length;
+            if (fileLength == 0) return null;
+
+            using var fs = new FileStream(tempFile, FileMode.Open, FileAccess.Read,
+                FileShare.None, 4096, FileOptions.SequentialScan | FileOptions.DeleteOnClose);
+
+            long readStart = Math.Max(0, fileLength - tailBytes);
+            int readSize = (int)(fileLength - readStart);
+            var buffer = new byte[readSize];
+
+            fs.Seek(readStart, SeekOrigin.Begin);
+            int totalRead = 0;
+            while (totalRead < readSize)
+            {
+                int read = fs.Read(buffer, totalRead, readSize - totalRead);
+                if (read == 0) break;
+                totalRead += read;
+            }
+
+            return totalRead < readSize ? buffer[..totalRead] : buffer;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[CSV] 复制方式读取失败: {ex.Message}");
+            return null;
+        }
+        finally
+        {
+            try { if (File.Exists(tempFile)) File.Delete(tempFile); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// 从尾部字节数组中提取最后 maxLines 行（从新到旧排列）。
+    /// 纯内存操作，不涉及任何文件 I/O。
+    /// </summary>
+    private static List<string> ExtractLinesFromTail(byte[] data, int maxLines, bool endsWithNewline)
+    {
+        var lines = new List<string>();
+        if (data.Length == 0 || maxLines <= 0) return lines;
+
+        int end = data.Length;
+
+        // 如果末尾不是换行符，最后一段是未完成的行，跳过
+        if (!endsWithNewline)
+        {
+            while (end > 0 && data[end - 1] != (byte)'\n')
+                end--;
+        }
+
+        // 从后往前扫描换行符，提取每一行
+        while (end > 0 && lines.Count < maxLines)
+        {
+            // 跳过尾部的 \r\n
+            while (end > 0 && (data[end - 1] == (byte)'\n' || data[end - 1] == (byte)'\r'))
+                end--;
+
+            if (end == 0) break;
+
+            // 找到这一行的起始位置
+            int lineEnd = end;
+            while (end > 0 && data[end - 1] != (byte)'\n')
+                end--;
+
+            int lineStart = end;
+            string line = System.Text.Encoding.UTF8.GetString(data, lineStart, lineEnd - lineStart);
+            lines.Add(line);
         }
 
         return lines;
-    }
-
-    private static string DecodeReversed(List<byte> reversedBytes)
-    {
-        if (reversedBytes.Count == 0) return string.Empty;
-        var bytes = new byte[reversedBytes.Count];
-        int n = reversedBytes.Count;
-        for (int i = 0; i < n; i++)
-            bytes[i] = reversedBytes[n - 1 - i];
-        return System.Text.Encoding.UTF8.GetString(bytes);
-    }
-
-    private static bool EndsWithLineTerminator(SafeFileHandle handle, long fileLength)
-    {
-        if (fileLength == 0) return false;
-        var buf = new byte[1];
-        int read = RandomAccess.Read(handle, buf.AsSpan(), fileLength - 1);
-        return read == 1 && buf[0] is (byte)'\r' or (byte)'\n';
     }
 
     private static CrimpData? ParseLine(

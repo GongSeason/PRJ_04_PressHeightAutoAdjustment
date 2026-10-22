@@ -457,10 +457,17 @@ public partial class MainViewModel : ObservableObject
             var head1Values = headAData.Where(d => d.IsHead1Valid).Select(d => d.Head1Height).ToList();
             var head2Values = headBData.Where(d => d.IsHead2Valid).Select(d => d.Head2Height).ToList();
 
-            // P1-1: 只有新增样本数 >= DriftSampleStride 时才推进漂移检测拍
+            // P1-1: 只有新增样本数 >= DriftSampleStride 时才推进漂移检测拍。
+            // 用最后一条数据的时间戳判断"新增了多少条"，而不是用窗口内总条数。
+            // 窗口填满后总条数不再增长，用总条数会导致漂移拍永远不推进。
             int driftSampleStride = Math.Max(10, Settings.Controller.MinSamplesPerEpoch / 2);
-            bool headAAdvanceDrift = (head1Values.Count - _headALastDriftSampleCount) >= driftSampleStride;
-            bool headBAdvanceDrift = (head2Values.Count - _headBLastDriftSampleCount) >= driftSampleStride;
+            int headANewSamples = head1Values.Count - _headALastDriftSampleCount;
+            int headBNewSamples = head2Values.Count - _headBLastDriftSampleCount;
+            // 窗口填满或 bypass 重置后，Count 可能 <= 上次记录值，此时用 Count 本身作为新增量
+            if (headANewSamples < 0) headANewSamples = head1Values.Count;
+            if (headBNewSamples < 0) headBNewSamples = head2Values.Count;
+            bool headAAdvanceDrift = headANewSamples >= driftSampleStride;
+            bool headBAdvanceDrift = headBNewSamples >= driftSampleStride;
             if (headAAdvanceDrift) _headALastDriftSampleCount = head1Values.Count;
             if (headBAdvanceDrift) _headBLastDriftSampleCount = head2Values.Count;
 
@@ -740,12 +747,14 @@ public partial class MainViewModel : ObservableObject
                     _headAAdjustDataTimestamp = currentDataTimestamp;
                     _headARecommendationApplied = false; // 写入成功，允许再次点击推荐值
                     _headAArbiter.Reset();
+                    _headALastDriftSampleCount = 0; // bypass 后数据从 0 涨，计数也清零
                 }
                 else
                 {
                     _headBAdjustDataTimestamp = currentDataTimestamp;
                     _headBRecommendationApplied = false;
                     _headBArbiter.Reset();
+                    _headBLastDriftSampleCount = 0;
                 }
 
                 SaveCompensationState();
@@ -852,11 +861,14 @@ public partial class MainViewModel : ObservableObject
 
         if (sent)
         {
-            // Drift 下发成功：记录调整时间戳 bypass 旧数据 + 重置漂移历史
+            // Drift 下发成功：记录调整时间戳 bypass 旧数据 + 重置漂移历史 + 清零漂移拍计数
             if (decision.RequiresAction)
             {
                 setAdjustTimestamp(dataTimestamp);
                 arbiter.Reset();
+                // bypass 后数据从 0 开始涨，漂移拍计数也必须清零，否则永远追不上
+                if (headIndex == 0) _headALastDriftSampleCount = 0;
+                else _headBLastDriftSampleCount = 0;
             }
             // 非节能模式 Stable 下发不 bypass（不需要冷却期，每次都发）
         }

@@ -240,6 +240,7 @@ public class DecisionArbiter
     public void Reset()
     {
         _driftDetector.Reset();
+        _r2r.ResetKBoost();
     }
 
     private static ProductStats CalculateStats(string name, IReadOnlyList<double> values, double trimPercentage)

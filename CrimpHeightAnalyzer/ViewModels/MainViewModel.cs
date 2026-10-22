@@ -42,9 +42,10 @@ public partial class MainViewModel : ObservableObject
     private DateTime? _headAAdjustDataTimestamp;
     private DateTime? _headBAdjustDataTimestamp;
 
-    // P1-1: 每个压头自上一拍以来新增的有效样本数，用于修正 DriftScore 拍定义
-    private int _headALastDriftSampleCount;
-    private int _headBLastDriftSampleCount;
+    // P1-1: 上一拍时最后一条数据的时间戳，用于统计新增样本数推进漂移检测拍。
+    // 不再用窗口内总条数（窗口填满后不再增长，会导致漂移拍永远不推进）。
+    private DateTime? _headALastDriftTimestamp;
+    private DateTime? _headBLastDriftTimestamp;
 
     // 推荐值按钮防重复累加标志：写入 PLC 成功后置 false，允许再次点击
     private bool _headARecommendationApplied;
@@ -457,19 +458,18 @@ public partial class MainViewModel : ObservableObject
             var head1Values = headAData.Where(d => d.IsHead1Valid).Select(d => d.Head1Height).ToList();
             var head2Values = headBData.Where(d => d.IsHead2Valid).Select(d => d.Head2Height).ToList();
 
-            // P1-1: 只有新增样本数 >= DriftSampleStride 时才推进漂移检测拍。
-            // 用最后一条数据的时间戳判断"新增了多少条"，而不是用窗口内总条数。
-            // 窗口填满后总条数不再增长，用总条数会导致漂移拍永远不推进。
+            // P1-1: 用时间戳统计新增样本数来推进漂移检测拍。
+            // 不用窗口内总条数（窗口填满后不再增长，漂移拍会永远停住）。
             int driftSampleStride = Math.Max(10, Settings.Controller.MinSamplesPerEpoch / 2);
-            int headANewSamples = head1Values.Count - _headALastDriftSampleCount;
-            int headBNewSamples = head2Values.Count - _headBLastDriftSampleCount;
-            // 窗口填满或 bypass 重置后，Count 可能 <= 上次记录值，此时用 Count 本身作为新增量
-            if (headANewSamples < 0) headANewSamples = head1Values.Count;
-            if (headBNewSamples < 0) headBNewSamples = head2Values.Count;
+
+            int headANewSamples = CountNewSamplesSince(headAData, _headALastDriftTimestamp);
+            int headBNewSamples = CountNewSamplesSince(headBData, _headBLastDriftTimestamp);
             bool headAAdvanceDrift = headANewSamples >= driftSampleStride;
             bool headBAdvanceDrift = headBNewSamples >= driftSampleStride;
-            if (headAAdvanceDrift) _headALastDriftSampleCount = head1Values.Count;
-            if (headBAdvanceDrift) _headBLastDriftSampleCount = head2Values.Count;
+            if (headAAdvanceDrift && headAData.Count > 0)
+                _headALastDriftTimestamp = headAData[^1].RecordedAt;
+            if (headBAdvanceDrift && headBData.Count > 0)
+                _headBLastDriftTimestamp = headBData[^1].RecordedAt;
 
             var headAResult = _headAArbiter.ArbitrateSingle("铆压#1", head1Values,
                 Settings.Controller, currentDataTimestamp, headAAdvanceDrift);
@@ -670,9 +670,9 @@ public partial class MainViewModel : ObservableObject
         // P0-2: 重置两个压头的调整时间戳（但不清零 CompensationTracker 累计值）
         _headAAdjustDataTimestamp = null;
         _headBAdjustDataTimestamp = null;
-        // P1-1: 重置漂移拍计数
-        _headALastDriftSampleCount = 0;
-        _headBLastDriftSampleCount = 0;
+        // P1-1: 重置漂移拍时间戳
+        _headALastDriftTimestamp = null;
+        _headBLastDriftTimestamp = null;
         _compensationIndex = 0;
         _headACompensationValues.Clear();
         _headBCompensationValues.Clear();
@@ -747,14 +747,14 @@ public partial class MainViewModel : ObservableObject
                     _headAAdjustDataTimestamp = currentDataTimestamp;
                     _headARecommendationApplied = false; // 写入成功，允许再次点击推荐值
                     _headAArbiter.Reset();
-                    _headALastDriftSampleCount = 0; // bypass 后数据从 0 涨，计数也清零
+                    _headALastDriftTimestamp = null; // bypass 后重新统计新增
                 }
                 else
                 {
                     _headBAdjustDataTimestamp = currentDataTimestamp;
                     _headBRecommendationApplied = false;
                     _headBArbiter.Reset();
-                    _headBLastDriftSampleCount = 0;
+                    _headBLastDriftTimestamp = null;
                 }
 
                 SaveCompensationState();
@@ -786,8 +786,8 @@ public partial class MainViewModel : ObservableObject
         _lastAnalyzedDataTimestamp = null;
         _headAAdjustDataTimestamp = null;
         _headBAdjustDataTimestamp = null;
-        _headALastDriftSampleCount = 0;
-        _headBLastDriftSampleCount = 0;
+        _headALastDriftTimestamp = null;
+        _headBLastDriftTimestamp = null;
         _compensationIndex = 0;
         _headACompensationValues.Clear();
         _headBCompensationValues.Clear();
@@ -866,9 +866,9 @@ public partial class MainViewModel : ObservableObject
             {
                 setAdjustTimestamp(dataTimestamp);
                 arbiter.Reset();
-                // bypass 后数据从 0 开始涨，漂移拍计数也必须清零，否则永远追不上
-                if (headIndex == 0) _headALastDriftSampleCount = 0;
-                else _headBLastDriftSampleCount = 0;
+                // bypass 后重新统计新增，漂移拍时间戳清空
+                if (headIndex == 0) _headALastDriftTimestamp = null;
+                else _headBLastDriftTimestamp = null;
             }
             // 非节能模式 Stable 下发不 bypass（不需要冷却期，每次都发）
         }
@@ -1123,6 +1123,18 @@ public partial class MainViewModel : ObservableObject
                 adjustmentColor = "#FFFFFFFF";
                 break;
         }
+    }
+
+    /// <summary>
+    /// 统计指定时间戳之后的新增样本数。用于漂移拍推进判定。
+    /// 首次调用（sinceTimestamp == null）时返回全部条数。
+    /// </summary>
+    private static int CountNewSamplesSince(List<CrimpData> data, DateTime? sinceTimestamp)
+    {
+        if (!sinceTimestamp.HasValue || data.Count == 0)
+            return data.Count;
+
+        return data.Count(d => d.RecordedAt.HasValue && d.RecordedAt.Value > sinceTimestamp.Value);
     }
 
     /// <summary>

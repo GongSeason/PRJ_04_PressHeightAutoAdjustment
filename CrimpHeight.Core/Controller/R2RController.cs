@@ -53,6 +53,33 @@ public class R2RController
     }
 
     /// <summary>
+    /// 计算调整量 — 绕过死区版本，用于漂移确认触发。
+    /// 漂移确认意味着趋势已确认在往外跑，即使偏差还在死区内也应提前补偿。
+    /// Δ = K × Deviation，仅做步长限幅，不做死区判断。
+    /// </summary>
+    public double ComputeAdjustmentBypassDeadband(
+        double trimmedMean,
+        ControllerConfig config,
+        DivergenceLevel divergenceLevel)
+    {
+        config.Validate();
+
+        double target = config.TargetMidpoint;
+        double deviation = trimmedMean - target;
+
+        // 偏差为零时不动作（精确在目标点上无需调整）
+        if (Math.Abs(deviation) < 1e-10)
+            return 0;
+
+        double effectiveK = config.ControllerGain;
+        if (divergenceLevel == DivergenceLevel.Degraded)
+            effectiveK *= config.DegradedGainFactor;
+
+        double rawDelta = effectiveK * deviation;
+        return Math.Clamp(rawDelta, -config.MaxStepPerAdjust, config.MaxStepPerAdjust);
+    }
+
+    /// <summary>
     /// 判断调整方向
     /// </summary>
     public static AdjustmentDirection GetDirection(double delta)

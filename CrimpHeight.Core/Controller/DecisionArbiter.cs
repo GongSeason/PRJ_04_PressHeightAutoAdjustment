@@ -51,7 +51,18 @@ public class DecisionArbiter
 
         if (outOfBounds || driftConfirmed)
         {
-            double delta = _r2r.ComputeAdjustment(result.CombinedTrimmedMean, config, DivergenceLevel.Normal);
+            double delta;
+            if (outOfBounds)
+            {
+                // 越界触发：正常走控制律（含死区判断）
+                delta = _r2r.ComputeAdjustment(result.CombinedTrimmedMean, config, DivergenceLevel.Normal);
+            }
+            else
+            {
+                // 漂移确认触发：绕过死区，直接 K × deviation 限幅。
+                // 漂移的意义是"虽然还没越界，但趋势确认在往外跑"，应提前补偿。
+                delta = _r2r.ComputeAdjustmentBypassDeadband(result.CombinedTrimmedMean, config, DivergenceLevel.Normal);
+            }
             result.Decision = new HeadDecision
             {
                 State = HeadState.Drift,
@@ -190,7 +201,9 @@ public class DecisionArbiter
 
         if (outOfBounds || driftConfirmed)
         {
-            double delta = _r2r.ComputeAdjustment(result.CombinedTrimmedMean, config, divLevel);
+            double delta = outOfBounds
+                ? _r2r.ComputeAdjustment(result.CombinedTrimmedMean, config, divLevel)
+                : _r2r.ComputeAdjustmentBypassDeadband(result.CombinedTrimmedMean, config, divLevel);
             var direction = R2RController.GetDirection(delta);
 
             string reasonDetail = outOfBounds ? "偏差越界" : "DriftScore 确认";

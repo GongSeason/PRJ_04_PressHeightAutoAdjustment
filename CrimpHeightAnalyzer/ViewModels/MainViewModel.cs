@@ -1327,9 +1327,11 @@ public partial class MainViewModel : ObservableObject
                 NamePaint = new SolidColorPaint(new SKColor(176, 176, 176)),
                 LabelsPaint = new SolidColorPaint(new SKColor(117, 117, 117)),
                 SeparatorsPaint = new SolidColorPaint(new SKColor(42, 42, 42)),
-                // PLC 写入分辨率为 1e-5 mm；默认格式会把微小补偿刻度舍入成 0。
-                Labeler = value => value.ToString("F5"),
-                MinStep = 0.00001
+                // 固定范围 -0.1~0.1，每 0.02mm 一个刻度，共 10 格
+                Labeler = value => value.ToString("F3"),
+                MinStep = 0.02,
+                MinLimit = -0.1,
+                MaxLimit = 0.1
             }
         };
 
@@ -1340,7 +1342,11 @@ public partial class MainViewModel : ObservableObject
             {
                 Yi = 0,
                 Yj = 0,
-                Stroke = new SolidColorPaint(new SKColor(255, 255, 255, 60)) { StrokeThickness = 1 },
+                Stroke = new SolidColorPaint(new SKColor(255, 255, 255, 150))
+                {
+                    StrokeThickness = 1.5f,
+                    PathEffect = new DashEffect(new float[] { 6, 4 })
+                },
                 Fill = null
             }
         };
@@ -1368,22 +1374,10 @@ public partial class MainViewModel : ObservableObject
     {
         if (CompensationYAxes.Length == 0) return;
 
-        var values = _headACompensationValues
-            .Concat(_headBCompensationValues)
-            .Select(point => point.Y)
-            .Where(value => value.HasValue && double.IsFinite(value.Value))
-            .Select(value => value!.Value)
-            .ToList();
-
-        double min = values.Count == 0 ? 0 : values.Min();
-        double max = values.Count == 0 ? 0 : values.Max();
-        double range = max - min;
-        double magnitude = Math.Max(Math.Abs(min), Math.Abs(max));
-        double padding = Math.Max(range * 0.1, magnitude * 0.1);
-        if (padding < 0.00001) padding = 0.00001;
-
-        CompensationYAxes[0].MinLimit = min - padding;
-        CompensationYAxes[0].MaxLimit = max + padding;
+        // Y 轴固定为 -0.1 ~ 0.1 mm，与实际补偿值调整范围匹配，
+        // 使微小波动在图表上清晰可见，不再动态缩放。
+        CompensationYAxes[0].MinLimit = -0.1;
+        CompensationYAxes[0].MaxLimit = 0.1;
 
         // X 轴：只显示当前可见的点范围，避免索引一直增长导致图表拉伸
         if (CompensationXAxes.Length > 0 && _headACompensationValues.Count > 0)

@@ -266,6 +266,8 @@ public partial class MainViewModel : ObservableObject
     private readonly ObservableCollection<ObservablePoint> _headACompensationValues = new();
     private readonly ObservableCollection<ObservablePoint> _headBCompensationValues = new();
     private readonly Dictionary<int, DateTime> _compensationTimestamps = new();
+    /// <summary>供自定义 Tooltip 读取每个补偿点的记录时间。</summary>
+    public IReadOnlyDictionary<int, DateTime> CompensationTimestamps => _compensationTimestamps;
     private int _compensationIndex;
 
     public ISeries[] DistributionSeries { get; set; } = Array.Empty<ISeries>();
@@ -1294,8 +1296,7 @@ public partial class MainViewModel : ObservableObject
                 GeometrySize = 5,
                 GeometryFill = new SolidColorPaint(headAColor),
                 GeometryStroke = null,
-                LineSmoothness = 0,
-                TooltipLabelFormatter = point => FormatCompensationTooltip("铆压#1", point)
+                LineSmoothness = 0
             },
             new LineSeries<ObservablePoint>
             {
@@ -1306,8 +1307,7 @@ public partial class MainViewModel : ObservableObject
                 GeometrySize = 5,
                 GeometryFill = new SolidColorPaint(headBColor),
                 GeometryStroke = null,
-                LineSmoothness = 0,
-                TooltipLabelFormatter = point => FormatCompensationTooltip("铆压#2", point)
+                LineSmoothness = 0
             }
         };
 
@@ -1355,17 +1355,6 @@ public partial class MainViewModel : ObservableObject
                 Fill = null
             }
         };
-    }
-
-    private string FormatCompensationTooltip(string headName, LiveChartsCore.Kernel.ChartPoint point)
-    {
-        var model = point.Model as ObservablePoint;
-        int index = (int)(model?.X ?? 0);
-        double value = model?.Y ?? 0;
-        string timeStr = _compensationTimestamps.TryGetValue(index, out var ts)
-            ? ts.ToString("yyyy-MM-dd HH:mm:ss")
-            : "--";
-        return $"{headName}  #{index}\n补偿值: {value:F5} mm\n时间: {timeStr}";
     }
 
     private void AppendCompensationPoint(double headAValue, double headBValue)

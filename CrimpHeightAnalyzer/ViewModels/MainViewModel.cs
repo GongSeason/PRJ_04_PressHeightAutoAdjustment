@@ -265,6 +265,7 @@ public partial class MainViewModel : ObservableObject
     // 以自增索引作为 X 轴（第几次刷新计算），而非时间；仅追踪补偿值波动。
     private readonly ObservableCollection<ObservablePoint> _headACompensationValues = new();
     private readonly ObservableCollection<ObservablePoint> _headBCompensationValues = new();
+    private readonly Dictionary<int, DateTime> _compensationTimestamps = new();
     private int _compensationIndex;
 
     public ISeries[] DistributionSeries { get; set; } = Array.Empty<ISeries>();
@@ -676,6 +677,7 @@ public partial class MainViewModel : ObservableObject
         _compensationIndex = 0;
         _headACompensationValues.Clear();
         _headBCompensationValues.Clear();
+        _compensationTimestamps.Clear();
 
         StatusText = "已重置，从当前时间点重新采集数据";
         await RefreshDataAsync();
@@ -791,6 +793,7 @@ public partial class MainViewModel : ObservableObject
         _compensationIndex = 0;
         _headACompensationValues.Clear();
         _headBCompensationValues.Clear();
+        _compensationTimestamps.Clear();
         InitPlcAdapter();
     }
 
@@ -1291,7 +1294,8 @@ public partial class MainViewModel : ObservableObject
                 GeometrySize = 5,
                 GeometryFill = new SolidColorPaint(headAColor),
                 GeometryStroke = null,
-                LineSmoothness = 0
+                LineSmoothness = 0,
+                TooltipLabelFormatter = point => FormatCompensationTooltip("铆压#1", point)
             },
             new LineSeries<ObservablePoint>
             {
@@ -1302,7 +1306,8 @@ public partial class MainViewModel : ObservableObject
                 GeometrySize = 5,
                 GeometryFill = new SolidColorPaint(headBColor),
                 GeometryStroke = null,
-                LineSmoothness = 0
+                LineSmoothness = 0,
+                TooltipLabelFormatter = point => FormatCompensationTooltip("铆压#2", point)
             }
         };
 
@@ -1352,14 +1357,31 @@ public partial class MainViewModel : ObservableObject
         };
     }
 
+    private string FormatCompensationTooltip(string headName, LiveChartsCore.Kernel.ChartPoint point)
+    {
+        var model = point.Model as ObservablePoint;
+        int index = (int)(model?.X ?? 0);
+        double value = model?.Y ?? 0;
+        string timeStr = _compensationTimestamps.TryGetValue(index, out var ts)
+            ? ts.ToString("yyyy-MM-dd HH:mm:ss")
+            : "--";
+        return $"{headName}  #{index}\n补偿值: {value:F5} mm\n时间: {timeStr}";
+    }
+
     private void AppendCompensationPoint(double headAValue, double headBValue)
     {
         double x = ++_compensationIndex;
+        _compensationTimestamps[_compensationIndex] = DateTime.Now;
         _headACompensationValues.Add(new ObservablePoint(x, headAValue));
         _headBCompensationValues.Add(new ObservablePoint(x, headBValue));
 
         while (_headACompensationValues.Count > CompensationHistoryLimit)
+        {
+            var removed = _headACompensationValues[0];
+            int removedIndex = (int)(removed.X ?? 0);
+            _compensationTimestamps.Remove(removedIndex);
             _headACompensationValues.RemoveAt(0);
+        }
         while (_headBCompensationValues.Count > CompensationHistoryLimit)
             _headBCompensationValues.RemoveAt(0);
 

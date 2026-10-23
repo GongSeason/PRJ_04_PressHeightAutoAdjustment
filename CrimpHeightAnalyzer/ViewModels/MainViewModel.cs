@@ -13,6 +13,7 @@ using CrimpHeightAnalyzer.Services;
 using System.Text.Json;
 using LiveChartsCore;
 using LiveChartsCore.Defaults;
+using LiveChartsCore.Kernel;
 using LiveChartsCore.SkiaSharpView;
 using LiveChartsCore.SkiaSharpView.Painting;
 using LiveChartsCore.SkiaSharpView.Painting.Effects;
@@ -1287,7 +1288,7 @@ public partial class MainViewModel : ObservableObject
 
         CompensationSeries = new ISeries[]
         {
-            new LineSeries<ObservablePoint>
+            new CompensationLineSeries(_compensationTimestamps)
             {
                 Name = "铆压#1 补偿值",
                 Values = _headACompensationValues,
@@ -1298,7 +1299,7 @@ public partial class MainViewModel : ObservableObject
                 GeometryStroke = null,
                 LineSmoothness = 0
             },
-            new LineSeries<ObservablePoint>
+            new CompensationLineSeries(_compensationTimestamps)
             {
                 Name = "铆压#2 补偿值",
                 Values = _headBCompensationValues,
@@ -1596,4 +1597,26 @@ public partial class MainViewModel : ObservableObject
     }
 
     #endregion
+}
+
+/// <summary>
+/// 自定义 LineSeries，覆盖 tooltip 文本以显示记录时间。
+/// </summary>
+internal class CompensationLineSeries : LineSeries<ObservablePoint>
+{
+    private readonly Dictionary<int, DateTime> _timestamps;
+
+    public CompensationLineSeries(Dictionary<int, DateTime> timestamps)
+    {
+        _timestamps = timestamps;
+    }
+
+    public override string GetSecondaryToolTipText(ChartPoint point)
+    {
+        double x = point.Coordinate.SecondaryValue;
+        int idx = (int)x;
+        if (_timestamps.TryGetValue(idx, out var ts))
+            return $"#{idx}  {ts:yyyy-MM-dd HH:mm:ss}";
+        return $"#{idx}";
+    }
 }

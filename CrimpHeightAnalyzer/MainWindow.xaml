@@ -6,7 +6,6 @@
         xmlns:lvc="clr-namespace:LiveChartsCore.SkiaSharpView.WPF;assembly=LiveChartsCore.SkiaSharpView.WPF"
         xmlns:vm="clr-namespace:CrimpHeightAnalyzer.ViewModels"
         xmlns:conv="clr-namespace:CrimpHeightAnalyzer.Converters"
-        xmlns:views="clr-namespace:CrimpHeightAnalyzer.Views"
         mc:Ignorable="d"
         Title="压接高度反馈控制系统"
         WindowStartupLocation="CenterScreen"
@@ -594,11 +593,7 @@
                                                 YAxes="{Binding CompensationYAxes}"
                                                 Sections="{Binding CompensationSections}"
                                                 LegendPosition="Hidden"
-                                                TooltipPosition="Center">
-                                <lvc:CartesianChart.Tooltip>
-                                    <views:CompensationTooltip/>
-                                </lvc:CartesianChart.Tooltip>
-                            </lvc:CartesianChart>
+                                                TooltipPosition="Center"/>
 
                             <StackPanel Grid.Row="1" Grid.Column="1" Margin="16,0,0,0"
                                         VerticalAlignment="Center">

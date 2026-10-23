@@ -52,6 +52,33 @@ public class ControllerConfig
     /// <summary>Drift slope 最小幅度门限 (mm/拍) — |slope| 低于此值不判漂移，过滤噪声</summary>
     public double DriftSlopeThreshold { get; set; } = 0.0001;
 
+    /// <summary>
+    /// 数据产生间隔（秒）— 相机每隔多少秒写入一条数据。
+    /// 用于校验刷新间隔是否足够推进漂移检测拍。
+    /// 约束：RefreshInterval / DataInterval ≥ MinSamplesPerEpoch / 2
+    /// 即每次刷新的新增数据条数必须 ≥ 漂移拍推进门限。
+    /// </summary>
+    public double DataIntervalSeconds { get; set; } = 0.5;
+
+    // === 自适应增 K 参数 ===
+
+    /// <summary>连续停滞多少次后开始增 K</summary>
+    public int AdaptiveKStallThreshold { get; set; } = 3;
+
+    /// <summary>每次停滞后 K 的升档步进</summary>
+    public double AdaptiveKBoostStep { get; set; } = 0.1;
+
+    /// <summary>K 的绝对上限（自适应增 K 不会超过此值）</summary>
+    public double AdaptiveKMaxLimit { get; set; } = 0.8;
+
+    /// <summary>偏差幅度变化率低于此值视为收敛停滞（0.3 = 30%）</summary>
+    public double AdaptiveKStallChangeRatio { get; set; } = 0.3;
+
+    // === 漂移拍推进 ===
+
+    /// <summary>漂移拍推进最小门限 — 每次刷新新增样本数至少达到此值才推进一拍</summary>
+    public int DriftSampleStrideMin { get; set; } = 10;
+
     // === 目标点 ===
 
     /// <summary>
@@ -89,6 +116,23 @@ public class ControllerConfig
         if (DriftConfirmCycles < 1)
             throw new InvalidOperationException("漂移确认拍数必须大于 0。");
         RequireNonNegative(DriftSlopeThreshold, nameof(DriftSlopeThreshold));
+        RequirePositive(DataIntervalSeconds, nameof(DataIntervalSeconds));
+
+        // 自适应增 K 参数校验
+        if (AdaptiveKStallThreshold < 1)
+            throw new InvalidOperationException("自适应增K停滞阈值必须大于 0。");
+        RequirePositive(AdaptiveKBoostStep, nameof(AdaptiveKBoostStep));
+        if (!double.IsFinite(AdaptiveKMaxLimit) || AdaptiveKMaxLimit <= 0 || AdaptiveKMaxLimit > 1)
+            throw new InvalidOperationException("自适应增K上限必须在 (0, 1] 范围内。");
+        if (AdaptiveKMaxLimit <= ControllerGain)
+            throw new InvalidOperationException(
+                $"自适应增K上限 ({AdaptiveKMaxLimit}) 必须大于基础增益 K ({ControllerGain})，否则增K无意义。");
+        if (!double.IsFinite(AdaptiveKStallChangeRatio) || AdaptiveKStallChangeRatio <= 0 || AdaptiveKStallChangeRatio >= 1)
+            throw new InvalidOperationException("停滞变化率阈值必须在 (0, 1) 范围内。");
+
+        // 漂移拍推进门限校验
+        if (DriftSampleStrideMin < 1)
+            throw new InvalidOperationException("漂移拍推进最小门限必须大于 0。");
 
         // TargetMidpoint：未配置时自动取规格中点
         if (TargetMidpoint == 0 || !double.IsFinite(TargetMidpoint))

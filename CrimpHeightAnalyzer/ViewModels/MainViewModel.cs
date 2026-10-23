@@ -460,7 +460,7 @@ public partial class MainViewModel : ObservableObject
 
             // P1-1: 用时间戳统计新增样本数来推进漂移检测拍。
             // 不用窗口内总条数（窗口填满后不再增长，漂移拍会永远停住）。
-            int driftSampleStride = Math.Max(10, Settings.Controller.MinSamplesPerEpoch / 2);
+            int driftSampleStride = Math.Max(Settings.Controller.DriftSampleStrideMin, Settings.Controller.MinSamplesPerEpoch / 2);
 
             int headANewSamples = CountNewSamplesSince(headAData, _headALastDriftTimestamp);
             int headBNewSamples = CountNewSamplesSince(headBData, _headBLastDriftTimestamp);
@@ -1007,6 +1007,24 @@ public partial class MainViewModel : ObservableObject
             throw new InvalidOperationException("控制器配置不能为空。");
         Settings.Controller.Validate();
 
+        // 校验刷新间隔与数据产生间隔的关系：
+        // 每次刷新新增条数 = RefreshInterval / DataInterval
+        // 漂移拍推进门限 = Max(10, MinSamplesPerEpoch / 2)
+        // 新增条数必须 ≥ 门限，否则漂移检测永远不推进
+        if (Settings.Controller.DataIntervalSeconds > 0)
+        {
+            double newSamplesPerRefresh = Settings.RefreshIntervalSeconds / Settings.Controller.DataIntervalSeconds;
+            int driftStride = Math.Max(Settings.Controller.DriftSampleStrideMin, Settings.Controller.MinSamplesPerEpoch / 2);
+            if (newSamplesPerRefresh < driftStride)
+            {
+                double minRefreshInterval = driftStride * Settings.Controller.DataIntervalSeconds;
+                throw new InvalidOperationException(
+                    $"刷新间隔 {Settings.RefreshIntervalSeconds}s 内新增数据约 {newSamplesPerRefresh:F0} 条，" +
+                    $"不足漂移检测推进门限 {driftStride} 条。" +
+                    $"请增大刷新间隔（≥{minRefreshInterval:F0}s）或减小 MinSamplesPerEpoch。");
+            }
+        }
+
         if (Settings.Plc == null)
             throw new InvalidOperationException("PLC 配置不能为空。");
         if (Settings.Plc.UseRealPlc)
@@ -1366,6 +1384,15 @@ public partial class MainViewModel : ObservableObject
 
         CompensationYAxes[0].MinLimit = min - padding;
         CompensationYAxes[0].MaxLimit = max + padding;
+
+        // X 轴：只显示当前可见的点范围，避免索引一直增长导致图表拉伸
+        if (CompensationXAxes.Length > 0 && _headACompensationValues.Count > 0)
+        {
+            double xMin = _headACompensationValues[0].X ?? 0;
+            double xMax = _headACompensationValues[^1].X ?? 0;
+            CompensationXAxes[0].MinLimit = xMin;
+            CompensationXAxes[0].MaxLimit = xMax;
+        }
     }
 
     /// <summary>

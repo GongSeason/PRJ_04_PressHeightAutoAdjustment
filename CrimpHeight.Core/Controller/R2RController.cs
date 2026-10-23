@@ -11,22 +11,11 @@ public class R2RController
 {
     // === 自适应增 K 状态 ===
     // 检测收敛停滞：连续多次偏差方向一致、幅度变化小但进不了死区，逐步增 K。
-    // 偏差进入死区或方向反转时立即恢复原始 K。
+    // 偏差进入死区或方向反转时恢复/回退 K。
+    // 所有阈值参数从 ControllerConfig 读取，不硬编码。
 
     private int _stallCount;                // 连续停滞次数
     private double _lastDeviation = double.NaN; // 上次偏差值
-
-    /// <summary>连续多少次停滞后开始增 K</summary>
-    private const int StallThreshold = 3;
-
-    /// <summary>每次停滞 K 的升档步进</summary>
-    private const double KBoostStep = 0.1;
-
-    /// <summary>K 的绝对上限</summary>
-    private const double KMaxLimit = 0.8;
-
-    /// <summary>偏差变化率低于此值视为"幅度变化小"（收敛停滞）</summary>
-    private const double StallChangeRatio = 0.3;
 
     /// <summary>当前生效的 K 增量（0 = 未增 K）</summary>
     public double CurrentKBoost { get; private set; }
@@ -56,8 +45,8 @@ public class R2RController
         // 自适应增 K：检测收敛停滞
         UpdateStallDetection(deviation, config);
 
-        // 确定有效 K = 基础 K + 自适应增量，上限 0.8
-        double effectiveK = Math.Min(config.ControllerGain + CurrentKBoost, KMaxLimit);
+        // 确定有效 K = 基础 K + 自适应增量，上限由配置决定
+        double effectiveK = Math.Min(config.ControllerGain + CurrentKBoost, config.AdaptiveKMaxLimit);
         if (divergenceLevel == DivergenceLevel.Degraded)
         {
             effectiveK *= config.DegradedGainFactor;
@@ -86,7 +75,7 @@ public class R2RController
         if (Math.Abs(deviation) < 1e-10)
             return 0;
 
-        double effectiveK = Math.Min(config.ControllerGain + CurrentKBoost, KMaxLimit);
+        double effectiveK = Math.Min(config.ControllerGain + CurrentKBoost, config.AdaptiveKMaxLimit);
         if (divergenceLevel == DivergenceLevel.Degraded)
             effectiveK *= config.DegradedGainFactor;
 
@@ -96,7 +85,8 @@ public class R2RController
 
     /// <summary>
     /// 检测收敛停滞并更新 K 增量。
-    /// 停滞条件：偏差方向与上次一致，且幅度变化率 < 30%（说明调整没怎么起效）。
+    /// 停滞条件：偏差方向与上次一致，且幅度变化率低于配置阈值（说明调整没怎么起效）。
+    /// 所有阈值从 ControllerConfig 读取。
     /// </summary>
     private void UpdateStallDetection(double deviation, ControllerConfig config)
     {
@@ -111,22 +101,21 @@ public class R2RController
             ? Math.Abs(Math.Abs(deviation) - Math.Abs(_lastDeviation)) / Math.Abs(_lastDeviation)
             : 1.0;
 
-        if (sameDirection && changeRatio < StallChangeRatio)
+        if (sameDirection && changeRatio < config.AdaptiveKStallChangeRatio)
         {
             // 收敛停滞：方向一致，幅度几乎没变
             _stallCount++;
-            if (_stallCount >= StallThreshold)
+            if (_stallCount >= config.AdaptiveKStallThreshold)
             {
-                // 逐步增 K，每次 +0.1，上限 KMaxLimit - 基础K
-                double maxBoost = KMaxLimit - config.ControllerGain;
-                CurrentKBoost = Math.Min(CurrentKBoost + KBoostStep, maxBoost);
+                double maxBoost = config.AdaptiveKMaxLimit - config.ControllerGain;
+                CurrentKBoost = Math.Min(CurrentKBoost + config.AdaptiveKBoostStep, maxBoost);
             }
         }
         else if (!sameDirection)
         {
             // 方向反转 → 过调了，当前 K 太大，回退一档
             _stallCount = 0;
-            CurrentKBoost = Math.Max(0, CurrentKBoost - KBoostStep);
+            CurrentKBoost = Math.Max(0, CurrentKBoost - config.AdaptiveKBoostStep);
         }
         else
         {

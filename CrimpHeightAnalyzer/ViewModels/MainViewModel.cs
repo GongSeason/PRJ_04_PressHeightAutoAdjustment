@@ -840,6 +840,10 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void SaveRecipeConfig()
     {
+        // 保存前规范化所有配方路径
+        foreach (var recipe in RecipeConfig.Recipes)
+            recipe.MonitorPath = NormalizePath(recipe.MonitorPath);
+
         if (_recipeService.Save(RecipeConfig))
         {
             // 重新启动轮询和心跳定时器（间隔可能变了）
@@ -1070,6 +1074,57 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// 规范化文件路径：修正重复盘符、正反斜杠混用、多余分隔符等常见手误。
+    /// 例如：
+    ///   "E:\\E:\1062" → "E:\1062"
+    ///   "E://1062"   → "E:\1062"
+    ///   "E:\1062\"   → "E:\1062"
+    /// </summary>
+    private static string NormalizePath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return string.Empty;
+
+        // 统一正斜杠为反斜杠
+        string result = path.Replace('/', '\\');
+
+        // 修正重复盘符：如 "E:\\E:\xxx" → "E:\xxx"
+        // 检测模式：盘符:\...\盘符:\ （同一个盘符重复出现）
+        if (result.Length >= 5 && result[1] == ':')
+        {
+            char drive = char.ToUpper(result[0]);
+            // 在第3个字符之后查找是否再次出现 "X:\"
+            string drivePrefix = $"{drive}:\\";
+            int secondOccurrence = result.IndexOf(drivePrefix, 2, StringComparison.OrdinalIgnoreCase);
+            if (secondOccurrence > 0)
+            {
+                // 截取第二次出现的盘符开始的部分
+                result = result[secondOccurrence..];
+            }
+        }
+
+        // 合并连续的反斜杠（保留开头的 \\ 用于 UNC 路径）
+        while (result.Contains("\\\\"))
+        {
+            // 保留 UNC 路径开头的 \\
+            if (result.StartsWith("\\\\"))
+            {
+                string rest = result[2..].Replace("\\\\", "\\");
+                result = "\\\\" + rest;
+                break;
+            }
+            result = result.Replace("\\\\", "\\");
+        }
+
+        // 去掉末尾的反斜杠（除非是根目录如 "E:\"）
+        result = result.TrimEnd('\\');
+        if (result.Length == 2 && result[1] == ':')
+            result += "\\";
+
+        return result;
+    }
+
     private void SetupTimer()
     {
         _refreshTimer = new DispatcherTimer
@@ -1125,19 +1180,15 @@ public partial class MainViewModel : ObservableObject
             if (!value.HasValue) return;
 
             int programId = value.Value;
+            bool isFirstRead = _lastProgramId < 0;
 
-            // 首次读取时记录，不触发切换
-            if (_lastProgramId < 0)
-            {
-                _lastProgramId = programId;
-                UpdateRecipeDisplay(programId);
-                return;
-            }
+            // 程序号未变化（非首次）
+            if (!isFirstRead && programId == _lastProgramId) return;
 
-            // 程序号未变化
-            if (programId == _lastProgramId) return;
-
-            WriteLogToFile($"[配方] 检测到程序号变化: {_lastProgramId} → {programId}");
+            if (isFirstRead)
+                WriteLogToFile($"[配方] 首次读取程序号: {programId}");
+            else
+                WriteLogToFile($"[配方] 检测到程序号变化: {_lastProgramId} → {programId}");
             _lastProgramId = programId;
 
             // 查找对应配方
@@ -1175,8 +1226,8 @@ public partial class MainViewModel : ObservableObject
         // 1. 先保存当前配方的偏移量（如果有当前配方）
         SaveCurrentRecipeDeltas();
 
-        // 2. 更新路径和偏移量
-        Settings.MonitorPath = recipe.MonitorPath;
+        // 2. 更新路径和偏移量（兜底规范化）
+        Settings.MonitorPath = NormalizePath(recipe.MonitorPath);
         OnPropertyChanged(nameof(Settings));
         HeadAManualDelta = recipe.HeadAManualDelta;
         HeadBManualDelta = recipe.HeadBManualDelta;
@@ -1185,8 +1236,8 @@ public partial class MainViewModel : ObservableObject
         CurrentProgramId = recipe.ProgramId;
         UpdateRecipeDisplay(recipe.ProgramId);
 
-        // 4. 重置分析状态并刷新（等同于 ResetAndRefresh）
-        _resetTimestamp = _dataProvider?.LastDataTimestamp ?? DateTime.Now;
+        // 4. 重置分析状态（配方切换后读取新路径的全部数据，不按时间过滤）
+        _resetTimestamp = null;
         _headAArbiter.Reset();
         _headBArbiter.Reset();
         _lastAnalyzedDataTimestamp = null;

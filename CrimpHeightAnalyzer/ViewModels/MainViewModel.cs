@@ -28,9 +28,17 @@ public partial class MainViewModel : ObservableObject
     private readonly DecisionArbiter _headBArbiter = new();
     private readonly SettingsService _settingsService = new();
     private readonly CompensationStateService _compensationStateService = new();
+    private readonly RecipeService _recipeService = new();
     private CsvDataProvider? _dataProvider;
     private IPlcAdapter? _plcAdapter;
     private IDisposable? _plcDisposable;
+
+    // 配方轮询 & 心跳
+    private DispatcherTimer? _recipePollingTimer;
+    private DispatcherTimer? _heartbeatTimer;
+    private int _lastProgramId = -1;
+    private bool _heartbeatToggle;
+    private string _defaultMonitorPath = string.Empty; // settings.json 中的原始路径，配方 bypass 时回退
     
     private DispatcherTimer _refreshTimer = null!;
     private List<CrimpData> _currentData = new();
@@ -62,6 +70,8 @@ public partial class MainViewModel : ObservableObject
             settings.HasGlobalSKTypeface(SKTypeface.FromFamilyName("Microsoft YaHei")));
 
         Settings = _settingsService.Load();
+        _defaultMonitorPath = Settings.MonitorPath;
+        RecipeConfig = _recipeService.Load();
 
         // 从持久化文件恢复手动偏差值
         var compensationState = _compensationStateService.Load();
@@ -71,6 +81,8 @@ public partial class MainViewModel : ObservableObject
         InitDataProvider();
         SetupTimer();
         SetupCharts();
+        SetupRecipePolling();
+        SetupHeartbeat();
     }
 
     #region 配置
@@ -89,6 +101,22 @@ public partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     private string performanceText = "等待首次刷新";
+
+    #endregion
+
+    #region 配方管理
+
+    [ObservableProperty]
+    private RecipeConfig recipeConfig;
+
+    [ObservableProperty]
+    private string currentRecipeDisplay = "未启用配方";
+
+    [ObservableProperty]
+    private int currentProgramId;
+
+    [ObservableProperty]
+    private bool isRecipePanelOpen;
 
     #endregion
 
@@ -358,6 +386,7 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
+        _defaultMonitorPath = Settings.MonitorPath;
         InitDataProvider();
         IsSettingsPanelOpen = false;
         StatusText = "配置已保存";
@@ -779,6 +808,52 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
+    [RelayCommand]
+    private void ToggleRecipePanel()
+    {
+        IsRecipePanelOpen = !IsRecipePanelOpen;
+    }
+
+    [RelayCommand]
+    private void AddRecipe()
+    {
+        int nextId = RecipeConfig.Recipes.Count > 0
+            ? RecipeConfig.Recipes.Max(r => r.ProgramId) + 1
+            : 1;
+        RecipeConfig.Recipes.Add(new Recipe
+        {
+            ProgramId = nextId,
+            Name = $"配方{nextId}",
+            MonitorPath = string.Empty
+        });
+        OnPropertyChanged(nameof(RecipeConfig));
+    }
+
+    [RelayCommand]
+    private void RemoveRecipe(Recipe? recipe)
+    {
+        if (recipe == null) return;
+        RecipeConfig.Recipes.Remove(recipe);
+        OnPropertyChanged(nameof(RecipeConfig));
+    }
+
+    [RelayCommand]
+    private void SaveRecipeConfig()
+    {
+        if (_recipeService.Save(RecipeConfig))
+        {
+            // 重新启动轮询和心跳定时器（间隔可能变了）
+            SetupRecipePolling();
+            SetupHeartbeat();
+            IsRecipePanelOpen = false;
+            StatusText = "配方配置已保存";
+        }
+        else
+        {
+            StatusText = "配方配置保存失败";
+        }
+    }
+
     #endregion
 
     #region 私有方法
@@ -893,6 +968,9 @@ public partial class MainViewModel : ObservableObject
             HeadBManualDelta = HeadBManualDelta,
             LastSavedAt = DateTime.Now
         });
+
+        // 同步回写到当前配方
+        SaveCurrentRecipeDeltas();
     }
 
     private void InitPlcAdapter()
@@ -962,6 +1040,8 @@ public partial class MainViewModel : ObservableObject
     private void Cleanup()
     {
         _refreshTimer?.Stop();
+        _recipePollingTimer?.Stop();
+        _heartbeatTimer?.Stop();
         _plcDisposable?.Dispose();
         _plcDisposable = null;
         _plcAdapter = null;
@@ -998,6 +1078,173 @@ public partial class MainViewModel : ObservableObject
         };
         _refreshTimer.Tick += async (s, e) => await RefreshDataAsync();
         // 不自动启动，由用户点击启动按钮控制
+    }
+
+    private void SetupRecipePolling()
+    {
+        _recipePollingTimer?.Stop();
+
+        if (string.IsNullOrWhiteSpace(RecipeConfig.RecipePollingAddress))
+            return;
+
+        int intervalSec = Math.Max(1, RecipeConfig.RecipePollingIntervalSeconds);
+        _recipePollingTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(intervalSec)
+        };
+        _recipePollingTimer.Tick += async (s, e) => await PollRecipeAsync();
+        _recipePollingTimer.Start();
+        WriteLogToFile($"[配方] 轮询已启动: 地址={RecipeConfig.RecipePollingAddress}, 间隔={intervalSec}s");
+    }
+
+    private void SetupHeartbeat()
+    {
+        _heartbeatTimer?.Stop();
+
+        if (string.IsNullOrWhiteSpace(RecipeConfig.HeartbeatAddress))
+            return;
+
+        int intervalMs = Math.Max(500, RecipeConfig.HeartbeatIntervalMs);
+        _heartbeatTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(intervalMs)
+        };
+        _heartbeatTimer.Tick += async (s, e) => await SendHeartbeatAsync();
+        _heartbeatTimer.Start();
+        WriteLogToFile($"[心跳] 已启动: 地址={RecipeConfig.HeartbeatAddress}, 间隔={intervalMs}ms");
+    }
+
+    private async Task PollRecipeAsync()
+    {
+        var plcAdapter = _plcAdapter;
+        if (plcAdapter == null) return;
+
+        try
+        {
+            var value = await plcAdapter.ReadInt16Async(RecipeConfig.RecipePollingAddress);
+            if (!value.HasValue) return;
+
+            int programId = value.Value;
+
+            // 首次读取时记录，不触发切换
+            if (_lastProgramId < 0)
+            {
+                _lastProgramId = programId;
+                UpdateRecipeDisplay(programId);
+                return;
+            }
+
+            // 程序号未变化
+            if (programId == _lastProgramId) return;
+
+            WriteLogToFile($"[配方] 检测到程序号变化: {_lastProgramId} → {programId}");
+            _lastProgramId = programId;
+
+            // 查找对应配方
+            var recipe = RecipeConfig.Recipes.FirstOrDefault(r =>
+                r.ProgramId == programId && !string.IsNullOrWhiteSpace(r.MonitorPath));
+
+            if (recipe == null)
+            {
+                WriteLogToFile($"[配方] 程序号 {programId} 无对应配方或路径为空，回退到默认路径");
+                UpdateRecipeDisplay(programId);
+
+                // 回退到 settings.json 中的默认路径
+                if (Settings.MonitorPath != _defaultMonitorPath)
+                {
+                    Settings.MonitorPath = _defaultMonitorPath;
+                    OnPropertyChanged(nameof(Settings));
+                    _dataProvider = new CsvDataProvider(Settings.MonitorPath, Settings.ScanDays);
+                    StatusText = $"程序#{programId} 未配置，已回退到默认路径";
+                }
+                return;
+            }
+
+            await SwitchRecipeAsync(recipe);
+        }
+        catch (Exception ex)
+        {
+            WriteLogToFile($"[配方] 轮询异常: {ex.Message}");
+        }
+    }
+
+    private async Task SwitchRecipeAsync(Recipe recipe)
+    {
+        WriteLogToFile($"[配方] 切换到: {recipe.Name} (程序#{recipe.ProgramId}), 路径={recipe.MonitorPath}");
+
+        // 1. 先保存当前配方的偏移量（如果有当前配方）
+        SaveCurrentRecipeDeltas();
+
+        // 2. 更新路径和偏移量
+        Settings.MonitorPath = recipe.MonitorPath;
+        OnPropertyChanged(nameof(Settings));
+        HeadAManualDelta = recipe.HeadAManualDelta;
+        HeadBManualDelta = recipe.HeadBManualDelta;
+
+        // 3. 更新界面显示
+        CurrentProgramId = recipe.ProgramId;
+        UpdateRecipeDisplay(recipe.ProgramId);
+
+        // 4. 重置分析状态并刷新（等同于 ResetAndRefresh）
+        _resetTimestamp = _dataProvider?.LastDataTimestamp ?? DateTime.Now;
+        _headAArbiter.Reset();
+        _headBArbiter.Reset();
+        _lastAnalyzedDataTimestamp = null;
+        _lastHeadADecision = null;
+        _lastHeadBDecision = null;
+        _headAAdjustDataTimestamp = null;
+        _headBAdjustDataTimestamp = null;
+        _headALastDriftTimestamp = null;
+        _headBLastDriftTimestamp = null;
+        _compensationIndex = 0;
+        _headACompensationValues.Clear();
+        _headBCompensationValues.Clear();
+        _compensationTimestamps.Clear();
+
+        // 5. 重新初始化数据提供器（新路径）
+        _dataProvider = new CsvDataProvider(Settings.MonitorPath, Settings.ScanDays);
+
+        StatusText = $"已切换配方: {recipe.Name} (程序#{recipe.ProgramId})";
+
+        // 6. 如果正在自动运行，立即刷新
+        if (IsRunning)
+            await RefreshDataAsync();
+    }
+
+    /// <summary>
+    /// 将当前手动偏移量回写到当前配方
+    /// </summary>
+    private void SaveCurrentRecipeDeltas()
+    {
+        if (_lastProgramId <= 0) return;
+        _recipeService.UpdateRecipeDeltas(RecipeConfig, _lastProgramId, HeadAManualDelta, HeadBManualDelta);
+    }
+
+    private void UpdateRecipeDisplay(int programId)
+    {
+        var recipe = RecipeConfig.Recipes.FirstOrDefault(r => r.ProgramId == programId);
+        if (recipe != null && !string.IsNullOrWhiteSpace(recipe.Name))
+            CurrentRecipeDisplay = $"{recipe.Name} (程序#{programId})";
+        else
+            CurrentRecipeDisplay = $"程序#{programId} (未配置)";
+        CurrentProgramId = programId;
+    }
+
+    private async Task SendHeartbeatAsync()
+    {
+        var plcAdapter = _plcAdapter;
+        if (plcAdapter == null) return;
+
+        try
+        {
+            short value = _heartbeatToggle ? (short)1 : (short)0;
+            _heartbeatToggle = !_heartbeatToggle;
+            await plcAdapter.WriteInt16Async(RecipeConfig.HeartbeatAddress, value);
+        }
+        catch (Exception ex)
+        {
+            WriteLogToFile($"[心跳] 写入异常: {ex.Message}");
+        }
     }
 
     private void ValidateSettings()

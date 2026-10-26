@@ -152,6 +152,9 @@
                             IsEnabled="{Binding IsManualOperationAllowed}"
                             Style="{StaticResource IndustrialButton}" Margin="0,0,8,0" Padding="12,5" FontSize="14"
                             ToolTip="重置并刷新：清空历史数据，从当前时间点重新采集（保留手动调整量）"/>
+                    <Button Content="📋" Command="{Binding ToggleRecipePanelCommand}"
+                            Style="{StaticResource IndustrialButton}" Margin="0,0,8,0" Padding="12,5" FontSize="14"
+                            ToolTip="配方管理"/>
                     <Button Content="⚙" Command="{Binding ToggleSettingsCommand}"
                             Style="{StaticResource IndustrialButton}" Padding="12,5" FontSize="14"
                             ToolTip="设置"/>
@@ -789,6 +792,117 @@
                     </StackPanel>
                 </ScrollViewer>
             </Border>
+            <!-- 配方管理面板 -->
+            <Border Grid.Column="1" Width="340" Background="#FF1A1A1A" BorderBrush="#FF2A2A2A"
+                    BorderThickness="1,0,0,0" Visibility="{Binding IsRecipePanelOpen, Converter={StaticResource BoolToVis}}"
+                    Margin="12,0,0,0">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="16">
+                        <TextBlock Text="配方管理" FontSize="16" FontWeight="Bold" Foreground="#FFFAFAFA" Margin="0,0,0,16"/>
+
+                        <TextBlock Text="程序号读取地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
+                        <TextBox Text="{Binding RecipeConfig.RecipePollingAddress, UpdateSourceTrigger=PropertyChanged}"
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="PLC 中存放当前程序号的寄存器地址（如 D2440）"/>
+
+                        <TextBlock Text="轮询间隔 (秒)" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
+                        <TextBox Text="{Binding RecipeConfig.RecipePollingIntervalSeconds, UpdateSourceTrigger=PropertyChanged}"
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="多久读取一次 PLC 程序号地址，检测配方切换"/>
+
+                        <Border Height="1" Background="#FF2A2A2A" Margin="0,4,0,12"/>
+
+                        <TextBlock Text="心跳信号地址" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
+                        <TextBox Text="{Binding RecipeConfig.HeartbeatAddress, UpdateSourceTrigger=PropertyChanged}"
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="心跳信号写入地址（如 D2459），交替写 1/0 表示上位机在线"/>
+
+                        <TextBlock Text="心跳间隔 (ms)" Style="{StaticResource LabelStyle}" Margin="0,0,0,4"/>
+                        <TextBox Text="{Binding RecipeConfig.HeartbeatIntervalMs, UpdateSourceTrigger=PropertyChanged}"
+                                 Style="{StaticResource InputStyle}" Margin="0,0,0,10"
+                                 ToolTip="心跳信号写入间隔（毫秒）"/>
+
+                        <Border Height="1" Background="#FF2A2A2A" Margin="0,4,0,12"/>
+
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                            <TextBlock Text="配方列表" FontSize="13" FontWeight="Bold" Foreground="#FFB0B0B0"
+                                       VerticalAlignment="Center"/>
+                            <Button Content="＋ 添加" Command="{Binding AddRecipeCommand}"
+                                    Style="{StaticResource IndustrialButton}" Padding="8,3" FontSize="11"
+                                    Margin="12,0,0,0" ToolTip="添加新配方"/>
+                        </StackPanel>
+
+                        <ItemsControl ItemsSource="{Binding RecipeConfig.Recipes}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Background="#FF222222" CornerRadius="4" Padding="10,8" Margin="0,0,0,8"
+                                            BorderBrush="#FF333333" BorderThickness="1">
+                                        <StackPanel>
+                                            <Grid Margin="0,0,0,6">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0" Foreground="#FFFFCA28" FontSize="12" FontWeight="SemiBold"
+                                                           VerticalAlignment="Center">
+                                                    <TextBlock.Text>
+                                                        <MultiBinding StringFormat="程序#{0} - {1}">
+                                                            <Binding Path="ProgramId"/>
+                                                            <Binding Path="Name"/>
+                                                        </MultiBinding>
+                                                    </TextBlock.Text>
+                                                </TextBlock>
+                                                <Button Grid.Column="1" Content="✕" FontSize="10" Padding="4,1"
+                                                        Background="Transparent" Foreground="#FFEF5350" BorderThickness="0" Cursor="Hand"
+                                                        Command="{Binding DataContext.RemoveRecipeCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                        CommandParameter="{Binding}"
+                                                        ToolTip="删除此配方"/>
+                                            </Grid>
+
+                                            <TextBlock Text="程序号" Foreground="#FF757575" FontSize="10" Margin="0,0,0,2"/>
+                                            <TextBox Text="{Binding ProgramId, UpdateSourceTrigger=PropertyChanged}"
+                                                     Style="{StaticResource InputStyle}" Margin="0,0,0,6" FontSize="11"/>
+
+                                            <TextBlock Text="别名" Foreground="#FF757575" FontSize="10" Margin="0,0,0,2"/>
+                                            <TextBox Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}"
+                                                     Style="{StaticResource InputStyle}" Margin="0,0,0,6" FontSize="11"/>
+
+                                            <TextBlock Text="监视文件夹路径" Foreground="#FF757575" FontSize="10" Margin="0,0,0,2"/>
+                                            <TextBox Text="{Binding MonitorPath, UpdateSourceTrigger=PropertyChanged}"
+                                                     Style="{StaticResource InputStyle}" Margin="0,0,0,6" FontSize="11"
+                                                     ToolTip="该料号的 CSV 数据文件夹（内部仍按 F2/日期 结构）"/>
+
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="8"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock Text="铆压#1 偏移量" Foreground="#FF757575" FontSize="10" Margin="0,0,0,2"/>
+                                                    <TextBox Text="{Binding HeadAManualDelta, UpdateSourceTrigger=LostFocus, StringFormat=F5}"
+                                                             Style="{StaticResource InputStyle}" FontSize="11"/>
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="2">
+                                                    <TextBlock Text="铆压#2 偏移量" Foreground="#FF757575" FontSize="10" Margin="0,0,0,2"/>
+                                                    <TextBox Text="{Binding HeadBManualDelta, UpdateSourceTrigger=LostFocus, StringFormat=F5}"
+                                                             Style="{StaticResource InputStyle}" FontSize="11"/>
+                                                </StackPanel>
+                                            </Grid>
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+
+                        <Border Height="1" Background="#FF2A2A2A" Margin="0,8,0,12"/>
+
+                        <Button Content="保存配方配置" Command="{Binding SaveRecipeConfigCommand}"
+                                Style="{StaticResource IndustrialButton}" Width="308"
+                                HorizontalAlignment="Left"/>
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
         </Grid>
 
         <!-- 加载遮罩 -->
@@ -807,6 +921,9 @@
                     <Ellipse Width="10" Height="10" Fill="{Binding PlcStatusColor}" VerticalAlignment="Center" Margin="0,0,6,0"/>
                     <TextBlock Text="PLC:" Foreground="#FF757575" FontSize="11" VerticalAlignment="Center" Margin="0,0,4,0"/>
                     <TextBlock Text="{Binding PlcStatusText}" Foreground="#FFB0B0B0" FontSize="11" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    <TextBlock Text="配方:" Foreground="#FF757575" FontSize="11" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                    <TextBlock Text="{Binding CurrentRecipeDisplay}" Foreground="#FFFFCA28" FontSize="11"
+                               FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,16,0"/>
                     <TextBlock Text="{Binding StatusText}" Foreground="#FF80CBC4" FontSize="11" VerticalAlignment="Center"/>
                 </StackPanel>
                 <TextBlock Text="MTD Automation  v.1.0.0" Foreground="#FF616161" FontSize="10"

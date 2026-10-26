@@ -13,6 +13,9 @@ public class MockPlcAdapter : IPlcAdapter
     // P1-2: 模拟状态标志（写 1 后下次调用前自动清 0）
     private readonly int[] _statusFlags = new int[2]; // 0=A, 1=B
 
+    // Mock 寄存器存储，用于模拟读写
+    private readonly Dictionary<string, short> _registers = new();
+
     public Task<bool> SendAdjustmentAsync(int headIndex, double deltaMm, CancellationToken cancellationToken = default)
     {
         string head = headIndex == 0 ? "压头A" : "压头B";
@@ -36,6 +39,20 @@ public class MockPlcAdapter : IPlcAdapter
         // 模拟 PLC 立即处理完成：清零标志
         _statusFlags[idx] = 0;
 
+        return Task.FromResult(true);
+    }
+
+    public Task<short?> ReadInt16Async(string address, CancellationToken cancellationToken = default)
+    {
+        short value = _registers.TryGetValue(address, out var v) ? v : (short)0;
+        OnLog?.Invoke($"[PLC Mock] 读取 {address} = {value}");
+        return Task.FromResult<short?>(value);
+    }
+
+    public Task<bool> WriteInt16Async(string address, short value, CancellationToken cancellationToken = default)
+    {
+        _registers[address] = value;
+        OnLog?.Invoke($"[PLC Mock] 写入 {address} = {value}");
         return Task.FromResult(true);
     }
 }

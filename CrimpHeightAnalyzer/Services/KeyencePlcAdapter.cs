@@ -221,6 +221,55 @@ public class KeyencePlcAdapter : IPlcAdapter, IDisposable
     }
 
     /// <summary>
+    /// 读取 PLC 指定地址的 16 位整数值
+    /// </summary>
+    public async Task<short?> ReadInt16Async(string address, CancellationToken cancellationToken = default)
+    {
+        if (_disposed) return null;
+        if (!await EnsureConnectedAsync(cancellationToken)) return null;
+
+        await _semaphore.WaitAsync(cancellationToken);
+        try
+        {
+            var result = await _plc.ReadInt16Async(address);
+            if (result.IsSuccess)
+                return result.Content;
+
+            OnLog?.Invoke($"[PLC] 读取 {address} 失败: {result.Message}");
+            return null;
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    /// <summary>
+    /// 向 PLC 指定地址写入 16 位整数值
+    /// </summary>
+    public async Task<bool> WriteInt16Async(string address, short value, CancellationToken cancellationToken = default)
+    {
+        if (_disposed) return false;
+        if (!await EnsureConnectedAsync(cancellationToken)) return false;
+
+        await _semaphore.WaitAsync(cancellationToken);
+        try
+        {
+            var result = await _plc.WriteAsync(address, value);
+            if (!result.IsSuccess)
+            {
+                OnLog?.Invoke($"[PLC] 写入 {address}={value} 失败: {result.Message}");
+                return false;
+            }
+            return true;
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    /// <summary>
     /// 断开连接并释放资源
     /// </summary>
     public void Dispose()

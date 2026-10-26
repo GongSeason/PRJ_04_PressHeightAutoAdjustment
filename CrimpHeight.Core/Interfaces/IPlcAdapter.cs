@@ -14,5 +14,20 @@ public interface IPlcAdapter
     /// <returns>指令是否成功写入 PLC</returns>
     Task<bool> SendAdjustmentAsync(int headIndex, double deltaMm, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 读取 PLC 指定地址的 16 位整数值
+    /// </summary>
+    /// <param name="address">寄存器地址（如 D2440）</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>读取结果；失败时返回 null</returns>
+    Task<short?> ReadInt16Async(string address, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// 向 PLC 指定地址写入 16 位整数值
+    /// </summary>
+    /// <param name="address">寄存器地址（如 D2459）</param>
+    /// <param name="value">要写入的值</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>是否写入成功</returns>
+    Task<bool> WriteInt16Async(string address, short value, CancellationToken cancellationToken = default);
 }

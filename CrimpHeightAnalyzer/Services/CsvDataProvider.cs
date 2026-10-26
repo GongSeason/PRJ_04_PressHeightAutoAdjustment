@@ -30,6 +30,12 @@ public class CsvDataProvider : IDataProvider
     public DateTime? LastDataTimestamp { get; private set; }
     public string LastReadDiagnostics { get; private set; } = "尚未读取";
 
+    /// <summary>实际扫描的根目录路径（规范化后）。</summary>
+    public string BasePath => _basePath;
+
+    /// <summary>最近一次成功读取的 CSV 文件全路径；未找到文件时为 null。</summary>
+    public string? LastUsedFilePath { get; private set; }
+
     public CsvDataProvider(string basePath, int scanDays = 0)
     {
         _basePath = basePath;
@@ -48,6 +54,7 @@ public class CsvDataProvider : IDataProvider
             var locateTimer = Stopwatch.StartNew();
             var latestFile = GetLatestCsvFile();
             locateTimer.Stop();
+            LastUsedFilePath = latestFile;
 
             long fileLength = 0;
             long bytesRead = 0;

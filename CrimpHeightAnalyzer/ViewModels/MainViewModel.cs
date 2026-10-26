@@ -466,7 +466,7 @@ public partial class MainViewModel : ObservableObject
             {
                 HasAlert = true;
                 AlertText = "未找到压接数据";
-                StatusText = "未找到数据";
+                StatusText = $"未找到数据 | 路径: {_dataProvider.BasePath}";
 
                 progressTimer.Stop();
                 totalTimer.Stop();
@@ -569,7 +569,10 @@ public partial class MainViewModel : ObservableObject
                 double headBAutoN = ComputeTheoreticalDelta(headBDeviation);
                 HeadAAccumulatedCompensation = (HeadAManualDelta + headAAutoN).ToString("F5");
                 HeadBAccumulatedCompensation = (HeadBManualDelta + headBAutoN).ToString("F5");
-                StatusText = $"数据加载完成 - {_currentData.Count}条记录";
+                string fileInfo = _dataProvider.LastUsedFilePath != null
+                    ? $" | 文件: {_dataProvider.LastUsedFilePath}"
+                    : $" | 路径: {_dataProvider.BasePath}";
+                StatusText = $"数据加载完成 - {_currentData.Count}条记录{fileInfo}";
                 IsLoading = false;
             });
             uiTimer.Stop();

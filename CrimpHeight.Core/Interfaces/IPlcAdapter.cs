@@ -15,6 +15,16 @@ public interface IPlcAdapter
     Task<bool> SendAdjustmentAsync(int headIndex, double deltaMm, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// 批量发送两个压头的调整指令（一次通信写入连续寄存器）。
+    /// 要求两个压头的寄存器地址连续（如 D2450~D2453）。
+    /// </summary>
+    /// <param name="headADeltaMm">压头A 调整量 (mm)</param>
+    /// <param name="headBDeltaMm">压头B 调整量 (mm)</param>
+    /// <param name="cancellationToken">取消令牌</param>
+    /// <returns>(压头A是否成功, 压头B是否成功)</returns>
+    Task<(bool HeadAOk, bool HeadBOk)> SendBatchAdjustmentAsync(double headADeltaMm, double headBDeltaMm, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// 读取 PLC 指定地址的 16 位整数值
     /// </summary>
     /// <param name="address">寄存器地址（如 D2440）</param>

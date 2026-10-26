@@ -42,6 +42,15 @@ public class MockPlcAdapter : IPlcAdapter
         return Task.FromResult(true);
     }
 
+    public Task<(bool HeadAOk, bool HeadBOk)> SendBatchAdjustmentAsync(
+        double headADeltaMm, double headBDeltaMm, CancellationToken cancellationToken = default)
+    {
+        int plcA = (int)Math.Round(headADeltaMm * 1000);
+        int plcB = (int)Math.Round(headBDeltaMm * 1000);
+        OnLog?.Invoke($"[PLC Mock] 批量调整 A={headADeltaMm:F5}mm({plcA}), B={headBDeltaMm:F5}mm({plcB})");
+        return Task.FromResult((true, true));
+    }
+
     public Task<short?> ReadInt16Async(string address, CancellationToken cancellationToken = default)
     {
         short value = _registers.TryGetValue(address, out var v) ? v : (short)0;

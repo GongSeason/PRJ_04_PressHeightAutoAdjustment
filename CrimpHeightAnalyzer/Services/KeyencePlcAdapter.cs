@@ -144,56 +144,44 @@ public class KeyencePlcAdapter : IPlcAdapter, IDisposable
                 OnLog?.Invoke($"[PLC] {headName} 握手检查已跳过 (BypassHandshake=true)");
             }
 
-            // 需求4: 写入有符号 32 位整数（mm × 1000 取整）
-            // 手动拆成两个 16 位 short 分别写入，确保字节序与 PLC 一致：
+            // 写入有符号 32 位整数（mm × 1000 取整）
+            // 拆成两个 16 位 short，用批量写入一次发送，减少通信次数
             //   address（如 D9000）= 低 16 位，address+1（如 D9001）= 高 16 位
             int plcValue = (int)Math.Round(deltaMm * 1000);
             short lowWord = (short)(plcValue & 0xFFFF);          // 低 16 位
             short highWord = (short)((plcValue >> 16) & 0xFFFF); // 高 16 位
 
-            // 解析地址：提取寄存器前缀和编号，+1 得到高字地址
             string highAddress = IncrementAddress(address);
 
             OnLog?.Invoke($"[PLC] {headName} 准备写入: {address}={lowWord}(低), {highAddress}={highWord}(高), 合计={plcValue} (原始={deltaMm:F5}mm × 1000)");
 
-            // 先写低 16 位
-            var resultLow = await _plc.WriteAsync(address, lowWord);
-            if (!resultLow.IsSuccess)
+            // 批量写入：一次通信写入连续两个寄存器（低字+高字）
+            var writeResult = await _plc.WriteAsync(address, new short[] { lowWord, highWord });
+            if (!writeResult.IsSuccess)
             {
-                OnLog?.Invoke($"[PLC ERROR] {headName} 低字写入失败: {resultLow.Message}");
+                OnLog?.Invoke($"[PLC ERROR] {headName} 批量写入失败: {writeResult.Message}");
                 IsConnected = false;
                 ScheduleReconnect();
-                OnConnectionChanged?.Invoke(false, $"写入失败: {resultLow.Message}");
+                OnConnectionChanged?.Invoke(false, $"写入失败: {writeResult.Message}");
                 return false;
             }
 
-            // 再写高 16 位
-            var resultHigh = await _plc.WriteAsync(highAddress, highWord);
-            if (!resultHigh.IsSuccess)
+            // 批量回读校验：一次通信读取连续两个寄存器
+            var readResult = await _plc.ReadInt16Async(address, 2);
+            if (readResult.IsSuccess)
             {
-                OnLog?.Invoke($"[PLC ERROR] {headName} 高字写入失败: {resultHigh.Message}");
-                IsConnected = false;
-                ScheduleReconnect();
-                OnConnectionChanged?.Invoke(false, $"写入失败: {resultHigh.Message}");
-                return false;
-            }
-
-            // 回读校验：分别读回两个 16 位字，拼成 32 位验证
-            var readLow = await _plc.ReadInt16Async(address);
-            var readHigh = await _plc.ReadInt16Async(highAddress);
-            if (readLow.IsSuccess && readHigh.IsSuccess)
-            {
-                int readBack = (int)(((uint)(ushort)readHigh.Content << 16) | (uint)(ushort)readLow.Content);
+                short[] readWords = readResult.Content;
+                int readBack = (int)(((uint)(ushort)readWords[1] << 16) | (uint)(ushort)readWords[0]);
                 if (readBack != plcValue)
                 {
-                    OnLog?.Invoke($"[PLC ERROR] {headName} 回读校验失败: 写入={plcValue}, 读回={readBack} (低={readLow.Content}, 高={readHigh.Content})");
+                    OnLog?.Invoke($"[PLC ERROR] {headName} 回读校验失败: 写入={plcValue}, 读回={readBack} (低={readWords[0]}, 高={readWords[1]})");
                     return false;
                 }
                 OnLog?.Invoke($"[PLC] {headName} 回读校验通过: {readBack}");
             }
             else
             {
-                OnLog?.Invoke($"[PLC WARN] {headName} 回读失败（写入可能成功）: 低={readLow.Message}, 高={readHigh.Message}");
+                OnLog?.Invoke($"[PLC WARN] {headName} 回读失败（写入可能成功）: {readResult.Message}");
             }
 
             OnLog?.Invoke($"[PLC] {headName} 调整 {deltaMm:F5}mm (PLC值={plcValue}) 写入 {address}/{highAddress}");
@@ -213,6 +201,104 @@ public class KeyencePlcAdapter : IPlcAdapter, IDisposable
             ScheduleReconnect();
             OnConnectionChanged?.Invoke(false, $"状态标志写入失败: {statusResult.Message}");
             return false;
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    /// <summary>
+    /// 批量发送两个压头的调整指令：一次通信写入 4 个连续寄存器 + 一次回读校验 + 一次写状态标志。
+    /// 要求压头A/B的寄存器地址连续（如 D2450~D2453），状态标志地址也连续（如 D2456~D2457）。
+    /// 总共 3~4 次 PLC 通信（含握手检查），替代原来的 6~8 次。
+    /// </summary>
+    public async Task<(bool HeadAOk, bool HeadBOk)> SendBatchAdjustmentAsync(
+        double headADeltaMm, double headBDeltaMm, CancellationToken cancellationToken = default)
+    {
+        if (_disposed) return (false, false);
+        if (!await EnsureConnectedAsync(cancellationToken)) return (false, false);
+
+        await _semaphore.WaitAsync(cancellationToken);
+        try
+        {
+            string addressA = _settings.HeadAAdjustAddress?.Trim() ?? "";
+            string statusAddressA = _settings.HeadAStatusAddress?.Trim() ?? "";
+
+            // 握手检查：批量读两个状态标志
+            if (!_settings.BypassHandshake)
+            {
+                var statusRead = await _plc.ReadInt16Async(statusAddressA, 2);
+                if (statusRead.IsSuccess)
+                {
+                    if (statusRead.Content[0] != 0 || statusRead.Content[1] != 0)
+                    {
+                        OnLog?.Invoke($"[PLC] 批量跳过：上一条指令未被处理 (A={statusRead.Content[0]}, B={statusRead.Content[1]})");
+                        return (false, false);
+                    }
+                }
+            }
+            else
+            {
+                OnLog?.Invoke("[PLC] 批量握手检查已跳过 (BypassHandshake=true)");
+            }
+
+            // 拆分为 4 个 short：A低, A高, B低, B高
+            int plcValueA = (int)Math.Round(headADeltaMm * 1000);
+            int plcValueB = (int)Math.Round(headBDeltaMm * 1000);
+            short[] words = new short[]
+            {
+                (short)(plcValueA & 0xFFFF),           // D2450: A低
+                (short)((plcValueA >> 16) & 0xFFFF),   // D2451: A高
+                (short)(plcValueB & 0xFFFF),           // D2452: B低
+                (short)((plcValueB >> 16) & 0xFFFF)    // D2453: B高
+            };
+
+            OnLog?.Invoke($"[PLC] 批量写入: A={plcValueA}({headADeltaMm:F5}mm), B={plcValueB}({headBDeltaMm:F5}mm) → {addressA}~+3");
+
+            // 一次写入 4 个连续寄存器
+            var writeResult = await _plc.WriteAsync(addressA, words);
+            if (!writeResult.IsSuccess)
+            {
+                OnLog?.Invoke($"[PLC ERROR] 批量写入失败: {writeResult.Message}");
+                IsConnected = false;
+                ScheduleReconnect();
+                OnConnectionChanged?.Invoke(false, $"批量写入失败: {writeResult.Message}");
+                return (false, false);
+            }
+
+            // 一次回读 4 个寄存器校验
+            var readResult = await _plc.ReadInt16Async(addressA, 4);
+            if (readResult.IsSuccess)
+            {
+                short[] r = readResult.Content;
+                int readBackA = (int)(((uint)(ushort)r[1] << 16) | (uint)(ushort)r[0]);
+                int readBackB = (int)(((uint)(ushort)r[3] << 16) | (uint)(ushort)r[2]);
+                if (readBackA != plcValueA || readBackB != plcValueB)
+                {
+                    OnLog?.Invoke($"[PLC ERROR] 批量回读校验失败: A写={plcValueA}读={readBackA}, B写={plcValueB}读={readBackB}");
+                    return (false, false);
+                }
+                OnLog?.Invoke($"[PLC] 批量回读校验通过: A={readBackA}, B={readBackB}");
+            }
+            else
+            {
+                OnLog?.Invoke($"[PLC WARN] 批量回读失败（写入可能成功）: {readResult.Message}");
+            }
+
+            // 一次写入两个状态标志
+            var statusResult = await _plc.WriteAsync(statusAddressA, new short[] { 1, 1 });
+            if (statusResult.IsSuccess)
+            {
+                OnLog?.Invoke($"[PLC] 批量状态标志已置1 ({statusAddressA}~+1)");
+                return (true, true);
+            }
+
+            OnLog?.Invoke($"[PLC ERROR] 批量状态标志写入失败: {statusResult.Message}");
+            IsConnected = false;
+            ScheduleReconnect();
+            OnConnectionChanged?.Invoke(false, $"批量状态标志写入失败: {statusResult.Message}");
+            return (false, false);
         }
         finally
         {

@@ -235,12 +235,22 @@ public class DecisionArbiter
     }
 
     /// <summary>
-    /// 重置所有内部状态（epoch 切换时）
+    /// 完全重置所有内部状态（配方切换、用户手动重置时调用）。
+    /// 包括漂移历史和自适应 K 增量。
     /// </summary>
     public void Reset()
     {
         _driftDetector.Reset();
         _r2r.ResetKBoost();
+    }
+
+    /// <summary>
+    /// 轻量重置：仅清除漂移历史，保留自适应 K 增量。
+    /// 用于自动下发后 bypass 旧数据的场景，让增 K 学习结果跨调整周期延续。
+    /// </summary>
+    public void ResetKeepK()
+    {
+        _driftDetector.Reset();
     }
 
     private static ProductStats CalculateStats(string name, IReadOnlyList<double> values, double trimPercentage)

@@ -431,6 +431,7 @@ public partial class MainViewModel : ObservableObject
         if (IsSettingsPanelOpen || IsLoading || _dataProvider == null) return;
 
         IsLoading = true;
+        _heartbeatTimer?.Stop(); // 刷新期间暂停心跳，避免与调整写入抢占 PLC 通信
         StatusText = "正在加载数据...";
         PerformanceText = "开始刷新…";
         var totalTimer = Stopwatch.StartNew();
@@ -591,6 +592,12 @@ public partial class MainViewModel : ObservableObject
             PerformanceText = $"刷新失败 | 已耗时 {totalTimer.ElapsedMilliseconds} ms | {ex.Message}";
             StatusText = $"加载失败: {ex.Message}";
             IsLoading = false;
+        }
+        finally
+        {
+            // 刷新结束后恢复心跳（无论成功/失败/无数据）
+            if (!string.IsNullOrWhiteSpace(RecipeConfig.HeartbeatAddress))
+                _heartbeatTimer?.Start();
         }
     }
 
@@ -893,78 +900,99 @@ public partial class MainViewModel : ObservableObject
         var plcAdapter = _plcAdapter;
         if (plcAdapter == null) return (false, false);
 
-        bool headASent = await SendSingleHeadAsync(plcAdapter, 0, dataTimestamp, headAResult,
-            _headAArbiter, v => _headAAdjustDataTimestamp = v);
-        bool headBSent = await SendSingleHeadAsync(plcAdapter, 1, dataTimestamp, headBResult,
-            _headBArbiter, v => _headBAdjustDataTimestamp = v);
+        // 先计算两个压头各自的 PLC 值和是否需要下发
+        var (headAShouldSend, headAPlcValue, headAMode) = ComputeHeadPlcValue(headAResult, 0);
+        var (headBShouldSend, headBPlcValue, headBMode) = ComputeHeadPlcValue(headBResult, 1);
+
+        if (!headAShouldSend && !headBShouldSend)
+            return (false, false);
+
+        // 不需要下发的压头保持上次值（写 0 不影响，PLC 侧由状态标志控制是否采用）
+        double plcA = headAShouldSend ? headAPlcValue : 0;
+        double plcB = headBShouldSend ? headBPlcValue : 0;
+
+        if (headAShouldSend)
+            WriteLogToFile($"[自动下发] 铆压#1 [{headAMode}]: {headAPlcValue:F5}mm");
+        if (headBShouldSend)
+            WriteLogToFile($"[自动下发] 铆压#2 [{headBMode}]: {headBPlcValue:F5}mm");
+
+        // 两个压头都需要下发时用批量模式（4 次通信），否则用单个模式（3 次通信）
+        bool headASent = false, headBSent = false;
+
+        if (headAShouldSend && headBShouldSend)
+        {
+            var (aOk, bOk) = await plcAdapter.SendBatchAdjustmentAsync(plcA, plcB);
+            headASent = aOk;
+            headBSent = bOk;
+            WriteLogToFile($"[自动下发] 批量结果: A={aOk}, B={bOk}");
+        }
+        else if (headAShouldSend)
+        {
+            headASent = await plcAdapter.SendAdjustmentAsync(0, plcA);
+            WriteLogToFile($"[自动下发] 铆压#1 结果: {headASent}");
+        }
+        else
+        {
+            headBSent = await plcAdapter.SendAdjustmentAsync(1, plcB);
+            WriteLogToFile($"[自动下发] 铆压#2 结果: {headBSent}");
+        }
+
+        // 下发成功后的状态更新
+        if (headASent)
+            OnHeadAdjustmentSent(dataTimestamp, headAResult, _headAArbiter, v => _headAAdjustDataTimestamp = v, 0);
+        if (headBSent)
+            OnHeadAdjustmentSent(dataTimestamp, headBResult, _headBArbiter, v => _headBAdjustDataTimestamp = v, 1);
 
         return (headASent, headBSent);
     }
 
     /// <summary>
-    /// 单个压头的自动下发逻辑。
-    /// PLC 收到的值 = M(手动偏差) + N(自动计算偏差)，不累加历史。
-    /// 节能模式：仅 Drift 时下发；非节能模式：Stable 也下发微小偏差。
+    /// 计算单个压头的 PLC 下发值和是否需要下发。
     /// </summary>
-    private async Task<bool> SendSingleHeadAsync(
-        IPlcAdapter plcAdapter,
-        int headIndex,
-        DateTime? dataTimestamp,
-        HeadAnalysisResult result,
-        DecisionArbiter arbiter,
-        Action<DateTime?> setAdjustTimestamp)
+    private (bool ShouldSend, double PlcValue, string Mode) ComputeHeadPlcValue(HeadAnalysisResult result, int headIndex)
     {
         var decision = result.Decision;
-        string headName = headIndex == 0 ? "铆压#1" : "铆压#2";
         double manualDelta = headIndex == 0 ? HeadAManualDelta : HeadBManualDelta;
 
-        // 确定本次自动调整量 N
         double autoDelta;
-        bool shouldSend;
+        string mode;
 
         if (decision.RequiresAction)
         {
-            // Drift 状态：使用仲裁结果
             autoDelta = decision.AdjustmentDelta;
-            shouldSend = true;
+            mode = "Drift";
         }
         else if (!Settings.EnergySavingMode && decision.State == HeadState.Stable)
         {
-            // 非节能模式 + Stable：计算微小偏差（跳过死区，直接 K × deviation 限幅）
             autoDelta = ComputeTheoreticalDelta(result.Deviation);
-            shouldSend = true;
+            mode = "Stable(非节能)";
         }
         else
         {
-            // 节能模式 Stable 或 WarmUp：不下发
-            return false;
+            return (false, 0, "");
         }
 
-        if (!shouldSend) return false;
-
-        // PLC 收到的值 = M(手动偏差) + N(自动偏差)，不累加
         double plcValue = manualDelta + autoDelta;
+        return (true, plcValue, mode);
+    }
 
-        string mode = decision.RequiresAction ? "Drift" : "Stable(非节能)";
-        WriteLogToFile($"[自动下发] {headName} [{mode}]: M={manualDelta:F5} + N={autoDelta:F5} = {plcValue:F5}mm");
-        bool sent = await plcAdapter.SendAdjustmentAsync(headIndex, plcValue);
-        WriteLogToFile($"[自动下发] {headName} 结果: {(sent ? "成功" : "失败")}");
-
-        if (sent)
+    /// <summary>
+    /// 下发成功后更新内部状态：bypass 旧数据、重置漂移历史（保留 K boost）。
+    /// </summary>
+    private void OnHeadAdjustmentSent(
+        DateTime? dataTimestamp,
+        HeadAnalysisResult result,
+        DecisionArbiter arbiter,
+        Action<DateTime?> setAdjustTimestamp,
+        int headIndex)
+    {
+        if (result.Decision.RequiresAction)
         {
-            // Drift 下发成功：记录调整时间戳 bypass 旧数据 + 重置漂移历史 + 清零漂移拍计数
-            if (decision.RequiresAction)
-            {
-                setAdjustTimestamp(dataTimestamp);
-                arbiter.Reset();
-                // bypass 后重新统计新增，漂移拍时间戳清空
-                if (headIndex == 0) _headALastDriftTimestamp = null;
-                else _headBLastDriftTimestamp = null;
-            }
-            // 非节能模式 Stable 下发不 bypass（不需要冷却期，每次都发）
+            setAdjustTimestamp(dataTimestamp);
+            arbiter.ResetKeepK();
+            if (headIndex == 0) _headALastDriftTimestamp = null;
+            else _headBLastDriftTimestamp = null;
         }
-
-        return sent;
     }
 
     /// <summary>

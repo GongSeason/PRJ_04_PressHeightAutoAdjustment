@@ -1569,7 +1569,47 @@ public partial class MainViewModel : ObservableObject
                 Name = "Count",
                 NamePaint = axisPaint,
                 LabelsPaint = labelPaint,
-                SeparatorsPaint = separatorPaint
+                SeparatorsPaint = separatorPaint,
+                MinLimit = 0
+            }
+        };
+
+        // 趋势图 Series：创建一次，后续只替换 Values
+        _p1Series = new LineSeries<double>
+        {
+            Name = "1高度 (铆压#1)",
+            Values = Array.Empty<double>(),
+            Stroke = new SolidColorPaint(new SKColor(66, 165, 245)) { StrokeThickness = 2.5f },
+            Fill = null,
+            GeometryStroke = null,
+            GeometryFill = null,
+            GeometrySize = 0,
+            LineSmoothness = 0.65,
+            IsVisible = IsP1Visible
+        };
+        _p2Series = new LineSeries<double>
+        {
+            Name = "2高度 (铆压#2)",
+            Values = Array.Empty<double>(),
+            Stroke = new SolidColorPaint(new SKColor(255, 183, 77)) { StrokeThickness = 2.5f },
+            Fill = null,
+            GeometryStroke = null,
+            GeometryFill = null,
+            GeometrySize = 0,
+            LineSmoothness = 0.65,
+            IsVisible = IsP2Visible
+        };
+        TrendSeries = new ISeries[] { _p1Series, _p2Series };
+
+        // 分布直方图 Series：创建一次，后续只替换 Values
+        DistributionSeries = new ISeries[]
+        {
+            new ColumnSeries<int>
+            {
+                Name = "Count",
+                Values = Array.Empty<int>(),
+                Fill = new SolidColorPaint(new SKColor(0, 191, 165)),
+                Stroke = new SolidColorPaint(new SKColor(0, 191, 165, 150)) { StrokeThickness = 1 }
             }
         };
 
@@ -1808,58 +1848,25 @@ public partial class MainViewModel : ObservableObject
         var p1Values = trendData.Where(d => d.IsHead1Valid).Select(d => d.Head1Height).ToArray();
         var p2Values = trendData.Where(d => d.IsHead2Valid).Select(d => d.Head2Height).ToArray();
 
-        _p1Series = new LineSeries<double>
-        {
-            Name = "1高度 (铆压#1)",
-            Values = p1Values,
-            Stroke = new SolidColorPaint(new SKColor(66, 165, 245)) { StrokeThickness = 2.5f },
-            // 显式设为 null：否则 LiveCharts 每次重建会从主题调色板轮换一个半透明填充色，
-            // 导致线下空白区的颜色每次刷新都在变。
-            Fill = null,
-            GeometryStroke = null,
-            GeometryFill = null,
-            GeometrySize = 0,
-            LineSmoothness = 0.65,
-            IsVisible = IsP1Visible
-        };
+        // 复用已有 Series 对象，只替换数据，避免重建触发完整重绘
+        if (_p1Series != null)
+            _p1Series.Values = p1Values;
+        if (_p2Series != null)
+            _p2Series.Values = p2Values;
 
-        _p2Series = new LineSeries<double>
-        {
-            Name = "2高度 (铆压#2)",
-            Values = p2Values,
-            Stroke = new SolidColorPaint(new SKColor(255, 183, 77)) { StrokeThickness = 2.5f },
-            Fill = null,
-            GeometryStroke = null,
-            GeometryFill = null,
-            GeometrySize = 0,
-            LineSmoothness = 0.65,
-            IsVisible = IsP2Visible
-        };
-
-        TrendSeries = new ISeries[] { _p1Series, _p2Series };
-
-        // Y轴范围 — 用稳健范围（忽略离群值），避免个别 outlier 把整个趋势压扁。
-        // 用户更关注规格带附近的正常波动，而非异常值。
+        // Y 轴范围：只更新 MinLimit/MaxLimit，不重建 Axis 对象
         var allTrendValues = p1Values.Concat(p2Values).ToList();
         var (yMin, yMax) = ComputeRobustTrendRange(allTrendValues);
-
-        TrendYAxes = new[]
+        if (TrendYAxes.Length > 0)
         {
-            new Axis
-            {
-                Name = "Height (mm)",
-                NamePaint = new SolidColorPaint(new SKColor(176, 176, 176)),
-                LabelsPaint = new SolidColorPaint(new SKColor(117, 117, 117)),
-                SeparatorsPaint = new SolidColorPaint(new SKColor(42, 42, 42)),
-                MinLimit = yMin,
-                MaxLimit = yMax
-            }
-        };
+            TrendYAxes[0].MinLimit = yMin;
+            TrendYAxes[0].MaxLimit = yMax;
+        }
 
-        // 参考线：复用持久化的 Section 实例，只更新 Y 值，保持虚线/实线样式稳定不闪烁。
+        // 参考线：复用持久化的 Section 实例，只更新 Y 值
         UpdateTrendSectionValues();
 
-        // 分布直方图
+        // 分布直方图：复用 Series 对象，只替换数据
         var allProductValues = new List<double>();
         allProductValues.AddRange(validData.Where(d => d.IsHead1Valid).Select(d => d.Head1Height));
         allProductValues.AddRange(validData.Where(d => d.IsHead2Valid).Select(d => d.Head2Height));
@@ -1883,49 +1890,18 @@ public partial class MainViewModel : ObservableObject
         for (int i = 0; i < hBinCount; i++)
             histLabels[i] = (hMin + (i + 0.5) * hBinWidth).ToString("F3");
 
-        DistributionSeries = new ISeries[]
-        {
-            new ColumnSeries<int>
-            {
-                Name = "Count",
-                Values = histCounts,
-                Fill = new SolidColorPaint(new SKColor(0, 191, 165)),
-                Stroke = new SolidColorPaint(new SKColor(0, 191, 165, 150)) { StrokeThickness = 1 }
-            }
-        };
+        // 复用分布图 Series，只替换数据
+        if (DistributionSeries.Length > 0 && DistributionSeries[0] is ColumnSeries<int> histSeries)
+            histSeries.Values = histCounts;
 
-        DistributionXAxes = new[]
+        // 复用分布图 Axes，只更新范围和标签
+        if (DistributionXAxes.Length > 0)
         {
-            new Axis
-            {
-                Name = "Height (mm)",
-                NamePaint = new SolidColorPaint(new SKColor(176, 176, 176)),
-                LabelsPaint = new SolidColorPaint(new SKColor(117, 117, 117)),
-                SeparatorsPaint = new SolidColorPaint(new SKColor(42, 42, 42)),
-                Labels = histLabels,
-                LabelsRotation = 45,
-                MinLimit = hMin - hBinWidth,
-                MaxLimit = hMax + hBinWidth
-            }
-        };
-
-        DistributionYAxes = new[]
-        {
-            new Axis
-            {
-                Name = "Count",
-                NamePaint = new SolidColorPaint(new SKColor(176, 176, 176)),
-                LabelsPaint = new SolidColorPaint(new SKColor(117, 117, 117)),
-                SeparatorsPaint = new SolidColorPaint(new SKColor(42, 42, 42)),
-                MinLimit = 0
-            }
-        };
-
-        OnPropertyChanged(nameof(TrendSeries));
-        OnPropertyChanged(nameof(TrendYAxes));
-        OnPropertyChanged(nameof(TrendSections));
-        OnPropertyChanged(nameof(DistributionSeries));
-        OnPropertyChanged(nameof(DistributionXAxes));
+            DistributionXAxes[0].Labels = histLabels;
+            DistributionXAxes[0].MinLimit = hMin - hBinWidth;
+            DistributionXAxes[0].MaxLimit = hMax + hBinWidth;
+        }
+        // DistributionYAxes 的 MinLimit=0 不变，无需更新
     }
 
     #endregion

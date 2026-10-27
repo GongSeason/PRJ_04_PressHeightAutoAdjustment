@@ -553,6 +553,7 @@
                                             YAxes="{Binding TrendYAxes}"
                                             Sections="{Binding TrendSections}"
                                             ZoomMode="Both"
+                                            AnimationsSpeed="0:0:0"
                                             LegendPosition="Hidden"
                                             TooltipPosition="Center"/>
 
@@ -595,6 +596,7 @@
                                                 XAxes="{Binding CompensationXAxes}"
                                                 YAxes="{Binding CompensationYAxes}"
                                                 Sections="{Binding CompensationSections}"
+                                                AnimationsSpeed="0:0:0"
                                                 LegendPosition="Hidden"
                                                 TooltipPosition="Center"/>
 

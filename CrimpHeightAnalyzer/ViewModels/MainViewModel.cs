@@ -290,7 +290,7 @@ public partial class MainViewModel : ObservableObject
     private RectangularSection? _trendLowerLimitSection;
     private RectangularSection? _trendMidpointSection;
 
-    private const int CompensationHistoryLimit = 300;
+    private const int CompensationHistoryLimit = 150;
     // 以自增索引作为 X 轴（第几次刷新计算），而非时间；仅追踪补偿值波动。
     private readonly ObservableCollection<ObservablePoint> _headACompensationValues = new();
     private readonly ObservableCollection<ObservablePoint> _headBCompensationValues = new();
@@ -1589,7 +1589,7 @@ public partial class MainViewModel : ObservableObject
             GeometryStroke = null,
             GeometryFill = null,
             GeometrySize = 0,
-            LineSmoothness = 0.65,
+            LineSmoothness = 0,
             IsVisible = IsP1Visible
         };
         _p2Series = new LineSeries<double>
@@ -1601,7 +1601,7 @@ public partial class MainViewModel : ObservableObject
             GeometryStroke = null,
             GeometryFill = null,
             GeometrySize = 0,
-            LineSmoothness = 0.65,
+            LineSmoothness = 0,
             IsVisible = IsP2Visible
         };
         TrendSeries = new ISeries[] { _p1Series, _p2Series };
@@ -1671,7 +1671,7 @@ public partial class MainViewModel : ObservableObject
                 Values = _headACompensationValues,
                 Stroke = new SolidColorPaint(headAColor) { StrokeThickness = 2 },
                 Fill = null,
-                GeometrySize = 5,
+                GeometrySize = 0,
                 GeometryFill = new SolidColorPaint(headAColor),
                 GeometryStroke = null,
                 LineSmoothness = 0
@@ -1682,7 +1682,7 @@ public partial class MainViewModel : ObservableObject
                 Values = _headBCompensationValues,
                 Stroke = new SolidColorPaint(headBColor) { StrokeThickness = 2 },
                 Fill = null,
-                GeometrySize = 5,
+                GeometrySize = 0,
                 GeometryFill = new SolidColorPaint(headBColor),
                 GeometryStroke = null,
                 LineSmoothness = 0

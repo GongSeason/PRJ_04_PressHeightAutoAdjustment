@@ -540,50 +540,55 @@ public partial class MainViewModel : ObservableObject
             controlMs = controlTimer.ElapsedMilliseconds;
             PerformanceText = $"CSV {csvMs} ms | 分析 {analysisMs} ms | 控制 {controlMs} ms | 更新图表…";
 
-            currentPhase = "UI/图表更新";
-            // 更新UI
+            currentPhase = "图表数据预计算";
+            // 在后台线程预计算所有图表数据（过滤、排序、直方图分桶），不阻塞 UI
+            var chartData = PrepareChartData(_currentData);
+
+            // 在后台线程预计算补偿值相关数据
+            double headADeviation = headAResult.Decision.State == HeadState.WarmUp
+                ? _lastValidHeadADeviation
+                : headAResult.Deviation;
+            double headBDeviation = headBResult.Decision.State == HeadState.WarmUp
+                ? _lastValidHeadBDeviation
+                : headBResult.Deviation;
+
+            if (headAResult.Decision.State != HeadState.WarmUp)
+                _lastValidHeadADeviation = headAResult.Deviation;
+            if (headBResult.Decision.State != HeadState.WarmUp)
+                _lastValidHeadBDeviation = headBResult.Deviation;
+
+            double headACompDelta = ComputeTheoreticalDelta(headADeviation);
+            double headBCompDelta = ComputeTheoreticalDelta(headBDeviation);
+            double headAAutoN = ComputeTheoreticalDelta(headADeviation);
+            double headBAutoN = ComputeTheoreticalDelta(headBDeviation);
+            string headACompText = (HeadAManualDelta + headAAutoN).ToString("F5");
+            string headBCompText = (HeadBManualDelta + headBAutoN).ToString("F5");
+            string fileInfo = _dataProvider.LastUsedFilePath != null
+                ? $" | 文件: {_dataProvider.LastUsedFilePath}"
+                : $" | 路径: {_dataProvider.BasePath}";
+            string statusMsg = $"数据加载完成 - {_currentData.Count}条记录{fileInfo}";
+            int dataCount = data.Count;
+
+            currentPhase = "UI赋值";
+            // UI 线程只做赋值，不做任何计算，用 BeginInvoke 异步投递不阻塞后台线程
             var uiTimer = Stopwatch.StartNew();
-            Application.Current.Dispatcher.Invoke(() =>
+            await Application.Current.Dispatcher.InvokeAsync(() =>
             {
                 UpdateHeadAResults(headAResult);
                 UpdateHeadBResults(headBResult);
                 UpdateAlerts(alerts);
-                UpdateCharts(_currentData);
-
-                // WarmUp 时截尾均值为 0，偏差 = 0 - TargetMidpoint 是假值，
-                // 绘制会产生突变尖刺。此时沿用上次的偏差值保持折线连续。
-                double headADeviation = headAResult.Decision.State == HeadState.WarmUp
-                    ? _lastValidHeadADeviation
-                    : headAResult.Deviation;
-                double headBDeviation = headBResult.Decision.State == HeadState.WarmUp
-                    ? _lastValidHeadBDeviation
-                    : headBResult.Deviation;
-
-                // 记住有效偏差值供下次 WarmUp 时使用
-                if (headAResult.Decision.State != HeadState.WarmUp)
-                    _lastValidHeadADeviation = headAResult.Deviation;
-                if (headBResult.Decision.State != HeadState.WarmUp)
-                    _lastValidHeadBDeviation = headBResult.Deviation;
-
-                AppendCompensationPoint(
-                    ComputeTheoreticalDelta(headADeviation),
-                    ComputeTheoreticalDelta(headBDeviation));
-                // 更新当前下发值显示：M + N
-                double headAAutoN = ComputeTheoreticalDelta(headADeviation);
-                double headBAutoN = ComputeTheoreticalDelta(headBDeviation);
-                HeadAAccumulatedCompensation = (HeadAManualDelta + headAAutoN).ToString("F5");
-                HeadBAccumulatedCompensation = (HeadBManualDelta + headBAutoN).ToString("F5");
-                string fileInfo = _dataProvider.LastUsedFilePath != null
-                    ? $" | 文件: {_dataProvider.LastUsedFilePath}"
-                    : $" | 路径: {_dataProvider.BasePath}";
-                StatusText = $"数据加载完成 - {_currentData.Count}条记录{fileInfo}";
+                ApplyChartData(chartData);
+                AppendCompensationPoint(headACompDelta, headBCompDelta);
+                HeadAAccumulatedCompensation = headACompText;
+                HeadBAccumulatedCompensation = headBCompText;
+                StatusText = statusMsg;
                 IsLoading = false;
             });
             uiTimer.Stop();
             uiMs = uiTimer.ElapsedMilliseconds;
             progressTimer.Stop();
             totalTimer.Stop();
-            PerformanceText = $"CSV {csvMs} ms ({_dataProvider.LastReadDiagnostics}) | 分析 {analysisMs} ms | 控制 {controlMs} ms | UI/图表 {uiMs} ms | 总计 {totalTimer.ElapsedMilliseconds} ms | {data.Count} 条";
+            PerformanceText = $"CSV {csvMs} ms ({_dataProvider.LastReadDiagnostics}) | 分析 {analysisMs} ms | 控制 {controlMs} ms | UI {uiMs} ms | 总计 {totalTimer.ElapsedMilliseconds} ms | {dataCount} 条";
         }
         catch (Exception ex)
         {
@@ -1836,37 +1841,50 @@ public partial class MainViewModel : ObservableObject
         return sorted[lowIndex] + (sorted[highIndex] - sorted[lowIndex]) * fraction;
     }
 
-    private void UpdateCharts(List<CrimpData> data)
+    /// <summary>
+    /// 图表数据预计算结果，在后台线程生成，UI 线程只做赋值。
+    /// </summary>
+    private struct ChartData
+    {
+        public double[] P1Values;
+        public double[] P2Values;
+        public double TrendYMin, TrendYMax;
+        public int[] HistCounts;
+        public string[] HistLabels;
+        public double HistXMin, HistXMax;
+        public string TrendTitle;
+    }
+
+    /// <summary>
+    /// 在后台线程预计算所有图表数据（过滤、排序、直方图分桶）。
+    /// 不涉及任何 UI 操作，纯 CPU 计算。
+    /// </summary>
+    private ChartData PrepareChartData(List<CrimpData> data)
     {
         var validData = data.Where(d => d.IsValid).ToList();
-        if (validData.Count == 0) return;
+        var result = new ChartData();
 
-        int trendCount = Math.Min(Settings.Controller.WindowSize, validData.Count);
-        TrendChartTitle = $"趋势图 (最近{trendCount}条数据)";
-        var trendData = validData.TakeLast(trendCount).ToList();
-
-        var p1Values = trendData.Where(d => d.IsHead1Valid).Select(d => d.Head1Height).ToArray();
-        var p2Values = trendData.Where(d => d.IsHead2Valid).Select(d => d.Head2Height).ToArray();
-
-        // 复用已有 Series 对象，只替换数据，避免重建触发完整重绘
-        if (_p1Series != null)
-            _p1Series.Values = p1Values;
-        if (_p2Series != null)
-            _p2Series.Values = p2Values;
-
-        // Y 轴范围：只更新 MinLimit/MaxLimit，不重建 Axis 对象
-        var allTrendValues = p1Values.Concat(p2Values).ToList();
-        var (yMin, yMax) = ComputeRobustTrendRange(allTrendValues);
-        if (TrendYAxes.Length > 0)
+        if (validData.Count == 0)
         {
-            TrendYAxes[0].MinLimit = yMin;
-            TrendYAxes[0].MaxLimit = yMax;
+            result.P1Values = Array.Empty<double>();
+            result.P2Values = Array.Empty<double>();
+            result.HistCounts = Array.Empty<int>();
+            result.HistLabels = Array.Empty<string>();
+            result.TrendTitle = "趋势图";
+            return result;
         }
 
-        // 参考线：复用持久化的 Section 实例，只更新 Y 值
-        UpdateTrendSectionValues();
+        int trendCount = Math.Min(Settings.Controller.WindowSize, validData.Count);
+        result.TrendTitle = $"趋势图 (最近{trendCount}条数据)";
+        var trendData = validData.TakeLast(trendCount).ToList();
 
-        // 分布直方图：复用 Series 对象，只替换数据
+        result.P1Values = trendData.Where(d => d.IsHead1Valid).Select(d => d.Head1Height).ToArray();
+        result.P2Values = trendData.Where(d => d.IsHead2Valid).Select(d => d.Head2Height).ToArray();
+
+        var allTrendValues = result.P1Values.Concat(result.P2Values).ToList();
+        (result.TrendYMin, result.TrendYMax) = ComputeRobustTrendRange(allTrendValues);
+
+        // 直方图
         var allProductValues = new List<double>();
         allProductValues.AddRange(validData.Where(d => d.IsHead1Valid).Select(d => d.Head1Height));
         allProductValues.AddRange(validData.Where(d => d.IsHead2Valid).Select(d => d.Head2Height));
@@ -1877,31 +1895,52 @@ public partial class MainViewModel : ObservableObject
         int hBinCount = 20;
         double hBinWidth = (hMax - hMin) / hBinCount;
 
-        var histCounts = new int[hBinCount];
+        result.HistCounts = new int[hBinCount];
         foreach (var v in allProductValues)
         {
             int b = (int)((v - hMin) / hBinWidth);
             if (b >= hBinCount) b = hBinCount - 1;
             if (b < 0) b = 0;
-            histCounts[b]++;
+            result.HistCounts[b]++;
         }
 
-        var histLabels = new string[hBinCount];
+        result.HistLabels = new string[hBinCount];
         for (int i = 0; i < hBinCount; i++)
-            histLabels[i] = (hMin + (i + 0.5) * hBinWidth).ToString("F3");
+            result.HistLabels[i] = (hMin + (i + 0.5) * hBinWidth).ToString("F3");
 
-        // 复用分布图 Series，只替换数据
+        result.HistXMin = hMin - hBinWidth;
+        result.HistXMax = hMax + hBinWidth;
+
+        return result;
+    }
+
+    /// <summary>
+    /// 在 UI 线程上应用预计算的图表数据，只做属性赋值，不做任何计算。
+    /// </summary>
+    private void ApplyChartData(in ChartData cd)
+    {
+        TrendChartTitle = cd.TrendTitle;
+
+        if (_p1Series != null) _p1Series.Values = cd.P1Values;
+        if (_p2Series != null) _p2Series.Values = cd.P2Values;
+
+        if (TrendYAxes.Length > 0)
+        {
+            TrendYAxes[0].MinLimit = cd.TrendYMin;
+            TrendYAxes[0].MaxLimit = cd.TrendYMax;
+        }
+
+        UpdateTrendSectionValues();
+
         if (DistributionSeries.Length > 0 && DistributionSeries[0] is ColumnSeries<int> histSeries)
-            histSeries.Values = histCounts;
+            histSeries.Values = cd.HistCounts;
 
-        // 复用分布图 Axes，只更新范围和标签
         if (DistributionXAxes.Length > 0)
         {
-            DistributionXAxes[0].Labels = histLabels;
-            DistributionXAxes[0].MinLimit = hMin - hBinWidth;
-            DistributionXAxes[0].MaxLimit = hMax + hBinWidth;
+            DistributionXAxes[0].Labels = cd.HistLabels;
+            DistributionXAxes[0].MinLimit = cd.HistXMin;
+            DistributionXAxes[0].MaxLimit = cd.HistXMax;
         }
-        // DistributionYAxes 的 MinLimit=0 不变，无需更新
     }
 
     #endregion

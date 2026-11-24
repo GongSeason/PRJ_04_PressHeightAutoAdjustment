@@ -11,6 +11,7 @@ using CrimpHeight.Core.Models;
 using CrimpHeightAnalyzer.Models;
 using CrimpHeightAnalyzer.Services;
 using System.Text.Json;
+using System.Threading.Channels;
 using LiveChartsCore;
 using LiveChartsCore.Defaults;
 using LiveChartsCore.Kernel;
@@ -38,6 +39,7 @@ public partial class MainViewModel : ObservableObject
     private DispatcherTimer? _heartbeatTimer;
     private int _lastProgramId = -1;
     private bool _heartbeatToggle;
+    private bool _plcTransactionAttemptedThisRefresh;
     private string _defaultMonitorPath = string.Empty; // settings.json 中的原始路径，配方 bypass 时回退
     
     private DispatcherTimer _refreshTimer = null!;
@@ -70,6 +72,8 @@ public partial class MainViewModel : ObservableObject
             settings.HasGlobalSKTypeface(SKTypeface.FromFamilyName("Microsoft YaHei")));
 
         Settings = _settingsService.Load();
+        WritePerformanceConfigRecord();
+        ApplyProcessPriority();
         _defaultMonitorPath = Settings.MonitorPath;
         RecipeConfig = _recipeService.Load();
 
@@ -98,6 +102,9 @@ public partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     private bool isLoading;
+
+    [ObservableProperty]
+    private bool isLoadingOverlayVisible;
 
     [ObservableProperty]
     private string performanceText = "等待首次刷新";
@@ -282,8 +289,21 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private bool isP2Visible = true;
 
+    [ObservableProperty]
+    private bool isTrendScatterMode;
+
     private LineSeries<double>? _p1Series;
     private LineSeries<double>? _p2Series;
+    private ScatterSeries<ObservablePoint>? _p1ScatterSeries;
+    private ScatterSeries<ObservablePoint>? _p2ScatterSeries;
+
+    private const double Head1ScatterCenter = 1.0;
+    private const double Head2ScatterCenter = 2.0;
+    private const double TrendScatterJitterHalfWidth = 0.3;
+
+    private Func<double, string>? _trendOriginalLabeler;
+    private double _trendOriginalMinStep;
+    private bool _trendOriginalForceStepToMin;
 
     // 趋势图参考线持久化：只建一次，之后仅更新 Y 值，避免每次刷新重建导致虚线样式丢失。
     private RectangularSection? _trendUpperLimitSection;
@@ -311,8 +331,51 @@ public partial class MainViewModel : ObservableObject
     public Axis[] CompensationYAxes { get; private set; } = Array.Empty<Axis>();
     public RectangularSection[] CompensationSections { get; private set; } = Array.Empty<RectangularSection>();
 
-    partial void OnIsP1VisibleChanged(bool value) { if (_p1Series != null) _p1Series.IsVisible = value; }
-    partial void OnIsP2VisibleChanged(bool value) { if (_p2Series != null) _p2Series.IsVisible = value; }
+    partial void OnIsP1VisibleChanged(bool value) => UpdateTrendSeriesVisibility();
+    partial void OnIsP2VisibleChanged(bool value) => UpdateTrendSeriesVisibility();
+
+    partial void OnIsTrendScatterModeChanged(bool value)
+    {
+        UpdateTrendSeriesVisibility();
+        UpdateTrendXAxisMode();
+    }
+
+    private void UpdateTrendSeriesVisibility()
+    {
+        if (_p1Series != null) _p1Series.IsVisible = IsP1Visible && !IsTrendScatterMode;
+        if (_p2Series != null) _p2Series.IsVisible = IsP2Visible && !IsTrendScatterMode;
+        if (_p1ScatterSeries != null) _p1ScatterSeries.IsVisible = IsP1Visible && IsTrendScatterMode;
+        if (_p2ScatterSeries != null) _p2ScatterSeries.IsVisible = IsP2Visible && IsTrendScatterMode;
+    }
+
+    private void UpdateTrendXAxisMode()
+    {
+        if (TrendXAxes.Length == 0) return;
+
+        var axis = TrendXAxes[0];
+        if (IsTrendScatterMode)
+        {
+            axis.Name = "铆压头";
+            axis.MinLimit = 0.4;
+            axis.MaxLimit = 2.6;
+            axis.MinStep = 1;
+            axis.ForceStepToMin = true;
+            axis.Labeler = value => Math.Abs(value - Head1ScatterCenter) < 0.01
+                ? "铆压#1"
+                : Math.Abs(value - Head2ScatterCenter) < 0.01
+                    ? "铆压#2"
+                    : string.Empty;
+        }
+        else
+        {
+            axis.Name = "Samples";
+            axis.MinLimit = null;
+            axis.MaxLimit = null;
+            axis.MinStep = _trendOriginalMinStep;
+            axis.ForceStepToMin = _trendOriginalForceStepToMin;
+            axis.Labeler = _trendOriginalLabeler!;
+        }
+    }
 
     #endregion
 
@@ -426,9 +489,19 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private async Task RefreshDataAsync()
+    private Task RefreshDataAsync() => RefreshCoreAsync(manual: false);
+
+    private async Task RefreshCoreAsync(bool manual)
     {
         if (IsSettingsPanelOpen || IsLoading || _dataProvider == null) return;
+
+        IsLoadingOverlayVisible = manual || Settings.Performance.ShowOverlayOnAutoRefresh;
+        long refreshId = Interlocked.Increment(ref _refreshSequence);
+        DateTime refreshStartedAt = DateTime.Now;
+        CsvReadMetrics csvMetrics = CsvReadMetrics.Empty;
+        bool plcTxn = false;
+        long chartPrepareMs = 0;
+        _plcTransactionAttemptedThisRefresh = false;
 
         IsLoading = true;
         _heartbeatTimer?.Stop(); // 刷新期间暂停心跳，避免与调整写入抢占 PLC 通信
@@ -436,7 +509,10 @@ public partial class MainViewModel : ObservableObject
         PerformanceText = "开始刷新…";
         var totalTimer = Stopwatch.StartNew();
         string currentPhase = "配置校验";
-        var progressTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        var progressTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(Math.Max(250, Settings.Performance.ProgressTextIntervalMs))
+        };
         progressTimer.Tick += (_, _) =>
             PerformanceText = $"阶段：{currentPhase} | 本次刷新已耗时 {totalTimer.Elapsed.TotalSeconds:F1} 秒";
         progressTimer.Start();
@@ -452,6 +528,7 @@ public partial class MainViewModel : ObservableObject
             var data = await _dataProvider.GetLatestDataAsync(Settings.Controller.WindowSize);
             csvTimer.Stop();
             csvMs = csvTimer.ElapsedMilliseconds;
+            csvMetrics = _dataProvider.LastReadMetrics;
 
             // 按重置时间戳过滤：只保留重置之后产生的数据
             if (_resetTimestamp.HasValue)
@@ -535,14 +612,23 @@ public partial class MainViewModel : ObservableObject
                 currentDataTimestamp,
                 headAResult,
                 headBResult);
+            plcTxn = _plcTransactionAttemptedThisRefresh;
 
             controlTimer.Stop();
             controlMs = controlTimer.ElapsedMilliseconds;
             PerformanceText = $"CSV {csvMs} ms | 分析 {analysisMs} ms | 控制 {controlMs} ms | 更新图表…";
 
             currentPhase = "图表数据预计算";
-            // 在后台线程预计算所有图表数据（过滤、排序、直方图分桶），不阻塞 UI
-            var chartData = PrepareChartData(_currentData);
+            var chartSettingsSnapshot = new ChartSettingsSnapshot(
+                Settings.Controller.WindowSize,
+                Settings.Controller.UpperLimit,
+                Settings.Controller.LowerLimit);
+            var chartDataSnapshot = _currentData.ToList();
+            var chartTimer = Stopwatch.StartNew();
+            var chartData = await Task.Run(
+                () => PrepareChartData(chartDataSnapshot, chartSettingsSnapshot));
+            chartTimer.Stop();
+            chartPrepareMs = chartTimer.ElapsedMilliseconds;
 
             // 在后台线程预计算补偿值相关数据
             double headADeviation = headAResult.Decision.State == HeadState.WarmUp
@@ -600,6 +686,27 @@ public partial class MainViewModel : ObservableObject
         }
         finally
         {
+            progressTimer.Stop();
+            if (totalTimer.IsRunning)
+                totalTimer.Stop();
+
+            if (Settings.Performance.EnablePerfLog)
+            {
+                string path = Path.Combine(_logPath, $"perf_{DateTime.Now:yyyyMMdd}.log");
+                string line = $"[{DateTime.Now:HH:mm:ss.fff}]\ttype=refresh\t" +
+                    $"refreshId={refreshId}\tstarted={refreshStartedAt:HH:mm:ss.fff}\t" +
+                    $"locateDirMs={csvMetrics.LocateDirMs}\tenumCsvMs={csvMetrics.EnumCsvMs}\t" +
+                    $"csvCount={csvMetrics.CsvCount}\topenMs={csvMetrics.OpenMs}\tsizeMs={csvMetrics.SizeMs}\t" +
+                    $"readMs={csvMetrics.ReadMs}\tparseMs={csvMetrics.ParseMs}\tbytesRead={csvMetrics.BytesRead}\t" +
+                    $"fileChanged={csvMetrics.FileChanged}\trescan={csvMetrics.Rescan}\t" +
+                    $"usedFallbackTs={csvMetrics.UsedFallbackTs}\tcsvMs={csvMs}\tanalysisMs={analysisMs}\t" +
+                    $"plcMs={controlMs}\tplcTxn={plcTxn}\tchartPrepareMs={chartPrepareMs}\tuiMs={uiMs}\t" +
+                    $"totalMs={totalTimer.ElapsedMilliseconds}\tIsRunning={IsRunning}\tsource={(manual ? "manual" : "auto")}";
+                QueueLogEntry(path, line);
+            }
+
+            IsLoadingOverlayVisible = false;
+
             // 刷新结束后恢复心跳（无论成功/失败/无数据）
             if (!string.IsNullOrWhiteSpace(RecipeConfig.HeartbeatAddress))
                 _heartbeatTimer?.Start();
@@ -730,7 +837,7 @@ public partial class MainViewModel : ObservableObject
         _compensationTimestamps.Clear();
 
         StatusText = "已重置，从当前时间点重新采集数据";
-        await RefreshDataAsync();
+        await RefreshCoreAsync(manual: true);
     }
 
     /// <summary>
@@ -882,7 +989,9 @@ public partial class MainViewModel : ObservableObject
 
     private void InitDataProvider()
     {
-        _dataProvider = new CsvDataProvider(Settings.MonitorPath, Settings.ScanDays);
+        _dataProvider = new CsvDataProvider(Settings.MonitorPath, Settings.ScanDays,
+            Settings.Performance.CsvBackgroundIoMode, Settings.Performance.CachedFileLocate,
+            Settings.Performance.NewFileMaxLatencySeconds, Settings.RefreshIntervalSeconds);
         _headAArbiter.Reset();
         _headBArbiter.Reset();
         _lastAnalyzedDataTimestamp = null;
@@ -911,6 +1020,8 @@ public partial class MainViewModel : ObservableObject
 
         if (!headAShouldSend && !headBShouldSend)
             return (false, false);
+
+        _plcTransactionAttemptedThisRefresh = true;
 
         // 不需要下发的压头保持上次值（写 0 不影响，PLC 侧由状态标志控制是否采用）
         double plcA = headAShouldSend ? headAPlcValue : 0;
@@ -1082,35 +1193,137 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void Cleanup()
     {
+        if (Interlocked.Exchange(ref _logCleanupStarted, 1) != 0)
+            return;
+
         _refreshTimer?.Stop();
         _recipePollingTimer?.Stop();
         _heartbeatTimer?.Stop();
         _plcDisposable?.Dispose();
         _plcDisposable = null;
         _plcAdapter = null;
+
+        _logQueue.Writer.TryComplete();
+        try
+        {
+            _logWriterTask?.Wait(1000);
+        }
+        catch (AggregateException ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"日志队列关闭时出错: {ex.GetBaseException().Message}");
+        }
     }
 
-    private static readonly object _logLock = new();
+    private readonly record struct LogEntry(string FilePath, string Line);
+
+    private static readonly Channel<LogEntry> _logQueue = Channel.CreateUnbounded<LogEntry>(
+        new UnboundedChannelOptions { SingleReader = true });
+    private static Task? _logWriterTask;
+    private static int _logWriterStarted;
+    private static int _logCleanupStarted;
+    private static long _refreshSequence;
     private static readonly string _logPath = Path.Combine(
         AppDomain.CurrentDomain.BaseDirectory, "log");
 
-    private static void WriteLogToFile(string message)
+    private void ApplyProcessPriority()
     {
+        if (!Settings.Performance.ProcessPriorityBelowNormal)
+            return;
+
         try
         {
-            Directory.CreateDirectory(_logPath);
-            string fileName = $"plc_{DateTime.Now:yyyyMMdd}.log";
-            string filePath = Path.Combine(_logPath, fileName);
-            string line = $"[{DateTime.Now:HH:mm:ss.fff}] {message}{Environment.NewLine}";
-            lock (_logLock)
+            using var process = Process.GetCurrentProcess();
+            process.PriorityClass = ProcessPriorityClass.BelowNormal;
+        }
+        catch (Exception ex)
+        {
+            WriteLogToFile($"[性能] 设置进程优先级为 BelowNormal 失败: {ex.Message}");
+        }
+    }
+
+    private void WritePerformanceConfigRecord()
+    {
+        var performance = Settings.Performance;
+        string normalized = performance.NormalizedFields.Count > 0
+            ? string.Join(",", performance.NormalizedFields)
+            : "none";
+
+        if (performance.EnablePerfLog)
+        {
+            string path = Path.Combine(_logPath, $"perf_{DateTime.Now:yyyyMMdd}.log");
+            string line = $"[{DateTime.Now:HH:mm:ss.fff}]\ttype=config\t" +
+                $"EnablePerfLog={performance.EnablePerfLog}\t" +
+                $"ProgressTextIntervalMs={performance.ProgressTextIntervalMs}\t" +
+                $"CsvBackgroundIoMode={performance.CsvBackgroundIoMode}\t" +
+                $"CachedFileLocate={performance.CachedFileLocate}\t" +
+                $"NewFileMaxLatencySeconds={performance.NewFileMaxLatencySeconds}\t" +
+                $"ShowOverlayOnAutoRefresh={performance.ShowOverlayOnAutoRefresh}\t" +
+                $"ProcessPriorityBelowNormal={performance.ProcessPriorityBelowNormal}\t" +
+                $"normalized={normalized}";
+            QueueLogEntry(path, line);
+        }
+        else if (performance.NormalizedFields.Count > 0)
+        {
+            WriteLogToFile($"[配置] Performance 字段已修正: {string.Join(",", performance.NormalizedFields)}");
+        }
+    }
+
+    private static void QueueLogEntry(string filePath, string line)
+    {
+        if (Interlocked.CompareExchange(ref _logWriterStarted, 1, 0) == 0)
+        {
+            try
             {
-                File.AppendAllText(filePath, line);
+                _logWriterTask = Task.Run(ProcessLogQueueAsync);
+            }
+            catch (Exception ex)
+            {
+                Volatile.Write(ref _logWriterStarted, 0);
+                System.Diagnostics.Debug.WriteLine($"日志队列启动失败: {ex.Message}");
+                return;
             }
         }
-        catch
+
+        try
         {
-            // 日志写入失败不影响主流程
+            if (!_logQueue.Writer.TryWrite(new LogEntry(filePath, line)))
+                System.Diagnostics.Debug.WriteLine("日志队列已关闭，丢弃一条日志");
         }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"日志队列投递失败: {ex.Message}");
+        }
+    }
+
+    private static async Task ProcessLogQueueAsync()
+    {
+        await foreach (var first in _logQueue.Reader.ReadAllAsync())
+        {
+            var batch = new List<LogEntry> { first };
+            while (batch.Count < 128 && _logQueue.Reader.TryRead(out var next))
+                batch.Add(next);
+
+            foreach (var group in batch.GroupBy(entry => entry.FilePath))
+            {
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(group.Key)!);
+                    File.AppendAllText(group.Key,
+                        string.Concat(group.Select(entry => entry.Line + Environment.NewLine)));
+                }
+                catch
+                {
+                    // 日志写入失败不影响主流程
+                }
+            }
+        }
+    }
+
+    private static void WriteLogToFile(string message)
+    {
+        string filePath = Path.Combine(_logPath, $"plc_{DateTime.Now:yyyyMMdd}.log");
+        string line = $"[{DateTime.Now:HH:mm:ss.fff}] {message}";
+        QueueLogEntry(filePath, line);
     }
 
     /// <summary>
@@ -1244,7 +1457,9 @@ public partial class MainViewModel : ObservableObject
                 {
                     Settings.MonitorPath = _defaultMonitorPath;
                     OnPropertyChanged(nameof(Settings));
-                    _dataProvider = new CsvDataProvider(Settings.MonitorPath, Settings.ScanDays);
+                    _dataProvider = new CsvDataProvider(Settings.MonitorPath, Settings.ScanDays,
+                        Settings.Performance.CsvBackgroundIoMode, Settings.Performance.CachedFileLocate,
+                        Settings.Performance.NewFileMaxLatencySeconds, Settings.RefreshIntervalSeconds);
                     StatusText = $"程序#{programId} 未配置，已回退到默认路径";
                 }
                 return;
@@ -1292,7 +1507,9 @@ public partial class MainViewModel : ObservableObject
         _compensationTimestamps.Clear();
 
         // 5. 重新初始化数据提供器（新路径）
-        _dataProvider = new CsvDataProvider(Settings.MonitorPath, Settings.ScanDays);
+        _dataProvider = new CsvDataProvider(Settings.MonitorPath, Settings.ScanDays,
+            Settings.Performance.CsvBackgroundIoMode, Settings.Performance.CachedFileLocate,
+            Settings.Performance.NewFileMaxLatencySeconds, Settings.RefreshIntervalSeconds);
 
         StatusText = $"已切换配方: {recipe.Name} (程序#{recipe.ProgramId})";
 
@@ -1554,6 +1771,9 @@ public partial class MainViewModel : ObservableObject
                 SeparatorsPaint = separatorPaint
             }
         };
+        _trendOriginalLabeler = TrendXAxes[0].Labeler;
+        _trendOriginalMinStep = TrendXAxes[0].MinStep;
+        _trendOriginalForceStepToMin = TrendXAxes[0].ForceStepToMin;
 
         DistributionXAxes = new[]
         {
@@ -1604,7 +1824,26 @@ public partial class MainViewModel : ObservableObject
             LineSmoothness = 0,
             IsVisible = IsP2Visible
         };
-        TrendSeries = new ISeries[] { _p1Series, _p2Series };
+        _p1ScatterSeries = new ScatterSeries<ObservablePoint>
+        {
+            Name = "1高度 (铆压#1)",
+            Values = Array.Empty<ObservablePoint>(),
+            GeometrySize = 5,
+            Stroke = null,
+            Fill = new SolidColorPaint(new SKColor(66, 165, 245, 180)),
+            IsVisible = false
+        };
+        _p2ScatterSeries = new ScatterSeries<ObservablePoint>
+        {
+            Name = "2高度 (铆压#2)",
+            Values = Array.Empty<ObservablePoint>(),
+            GeometrySize = 5,
+            Stroke = null,
+            Fill = new SolidColorPaint(new SKColor(255, 183, 77, 180)),
+            IsVisible = false
+        };
+        TrendSeries = new ISeries[] { _p1Series, _p2Series, _p1ScatterSeries, _p2ScatterSeries };
+        UpdateTrendSeriesVisibility();
 
         // 分布直方图 Series：创建一次，后续只替换 Values
         DistributionSeries = new ISeries[]
@@ -1798,15 +2037,13 @@ public partial class MainViewModel : ObservableObject
     /// 计算趋势图 Y 轴范围：以规格上下限为核心视窗，
     /// 用分位数过滤极端值，保证正常波动占满可视区。
     /// </summary>
-    private (double Min, double Max) ComputeRobustTrendRange(List<double> values)
+    private (double Min, double Max) ComputeRobustTrendRange(List<double> values, in ChartSettingsSnapshot settings)
     {
-        var ctrl = Settings.Controller;
-
         // 核心视窗：规格上下限外扩余量，保证规格线不贴边。
-        double specSpan = ctrl.UpperLimit - ctrl.LowerLimit;
+        double specSpan = settings.UpperLimit - settings.LowerLimit;
         double margin = Math.Max(specSpan * 0.15, 0.02);
-        double yMin = ctrl.LowerLimit - margin;
-        double yMax = ctrl.UpperLimit + margin;
+        double yMin = settings.LowerLimit - margin;
+        double yMax = settings.UpperLimit + margin;
 
         if (values.Count > 0)
         {
@@ -1841,13 +2078,33 @@ public partial class MainViewModel : ObservableObject
         return sorted[lowIndex] + (sorted[highIndex] - sorted[lowIndex]) * fraction;
     }
 
+    private static double ComputeScatterJitter(DateTime? recordedAt, double height, int occurrence)
+    {
+        unchecked
+        {
+            ulong x = (ulong)(recordedAt?.Ticks ?? 0)
+                    ^ (ulong)BitConverter.DoubleToInt64Bits(height)
+                    ^ ((ulong)occurrence * 0xD6E8FEB86659FD93UL);
+            x += 0x9E3779B97F4A7C15UL;
+            x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9UL;
+            x = (x ^ (x >> 27)) * 0x94D049BB133111EBUL;
+            x ^= x >> 31;
+            double u = (x >> 11) * (1.0 / (1UL << 53));
+            return (u - 0.5) * 2 * TrendScatterJitterHalfWidth;
+        }
+    }
+
     /// <summary>
     /// 图表数据预计算结果，在后台线程生成，UI 线程只做赋值。
     /// </summary>
+    private readonly record struct ChartSettingsSnapshot(int WindowSize, double UpperLimit, double LowerLimit);
+
     private struct ChartData
     {
         public double[] P1Values;
         public double[] P2Values;
+        public ObservablePoint[] P1ScatterPoints;
+        public ObservablePoint[] P2ScatterPoints;
         public double TrendYMin, TrendYMax;
         public int[] HistCounts;
         public string[] HistLabels;
@@ -1859,7 +2116,7 @@ public partial class MainViewModel : ObservableObject
     /// 在后台线程预计算所有图表数据（过滤、排序、直方图分桶）。
     /// 不涉及任何 UI 操作，纯 CPU 计算。
     /// </summary>
-    private ChartData PrepareChartData(List<CrimpData> data)
+    private ChartData PrepareChartData(List<CrimpData> data, in ChartSettingsSnapshot settings)
     {
         var validData = data.Where(d => d.IsValid).ToList();
         var result = new ChartData();
@@ -1868,21 +2125,43 @@ public partial class MainViewModel : ObservableObject
         {
             result.P1Values = Array.Empty<double>();
             result.P2Values = Array.Empty<double>();
+            result.P1ScatterPoints = Array.Empty<ObservablePoint>();
+            result.P2ScatterPoints = Array.Empty<ObservablePoint>();
             result.HistCounts = Array.Empty<int>();
             result.HistLabels = Array.Empty<string>();
             result.TrendTitle = "趋势图";
             return result;
         }
 
-        int trendCount = Math.Min(Settings.Controller.WindowSize, validData.Count);
+        int trendCount = Math.Min(settings.WindowSize, validData.Count);
         result.TrendTitle = $"趋势图 (最近{trendCount}条数据)";
         var trendData = validData.TakeLast(trendCount).ToList();
 
         result.P1Values = trendData.Where(d => d.IsHead1Valid).Select(d => d.Head1Height).ToArray();
         result.P2Values = trendData.Where(d => d.IsHead2Valid).Select(d => d.Head2Height).ToArray();
 
+        var head1Occurrences = new Dictionary<(long Ticks, double Height), int>();
+        result.P1ScatterPoints = trendData.Where(d => d.IsHead1Valid).Select(d =>
+        {
+            var key = (d.RecordedAt?.Ticks ?? 0, d.Head1Height);
+            int occurrence = head1Occurrences.TryGetValue(key, out int count) ? count : 0;
+            head1Occurrences[key] = occurrence + 1;
+            double x = Head1ScatterCenter + ComputeScatterJitter(d.RecordedAt, d.Head1Height, occurrence);
+            return new ObservablePoint(x, d.Head1Height);
+        }).ToArray();
+
+        var head2Occurrences = new Dictionary<(long Ticks, double Height), int>();
+        result.P2ScatterPoints = trendData.Where(d => d.IsHead2Valid).Select(d =>
+        {
+            var key = (d.RecordedAt?.Ticks ?? 0, d.Head2Height);
+            int occurrence = head2Occurrences.TryGetValue(key, out int count) ? count : 0;
+            head2Occurrences[key] = occurrence + 1;
+            double x = Head2ScatterCenter + ComputeScatterJitter(d.RecordedAt, d.Head2Height, occurrence);
+            return new ObservablePoint(x, d.Head2Height);
+        }).ToArray();
+
         var allTrendValues = result.P1Values.Concat(result.P2Values).ToList();
-        (result.TrendYMin, result.TrendYMax) = ComputeRobustTrendRange(allTrendValues);
+        (result.TrendYMin, result.TrendYMax) = ComputeRobustTrendRange(allTrendValues, settings);
 
         // 直方图
         var allProductValues = new List<double>();
@@ -1923,6 +2202,8 @@ public partial class MainViewModel : ObservableObject
 
         if (_p1Series != null) _p1Series.Values = cd.P1Values;
         if (_p2Series != null) _p2Series.Values = cd.P2Values;
+        if (_p1ScatterSeries != null) _p1ScatterSeries.Values = cd.P1ScatterPoints;
+        if (_p2ScatterSeries != null) _p2ScatterSeries.Values = cd.P2ScatterPoints;
 
         if (TrendYAxes.Length > 0)
         {

@@ -26,6 +26,8 @@ public class SettingsService
                 settings.MonitorPath ??= string.Empty;
                 settings.Controller ??= new();
                 settings.Plc ??= new();
+                settings.Performance ??= new();
+                settings.Performance.Normalize();
                 return settings;
             }
         }
@@ -34,7 +36,9 @@ public class SettingsService
             System.Diagnostics.Debug.WriteLine($"加载配置失败: {ex.Message}");
         }
 
-        return new AppSettings();
+        var defaults = new AppSettings();
+        defaults.Performance.Normalize();
+        return defaults;
     }
 
     /// <summary>

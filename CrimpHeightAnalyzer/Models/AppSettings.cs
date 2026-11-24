@@ -19,6 +19,9 @@ public class AppSettings
     /// <summary>自动刷新间隔（秒）</summary>
     public int RefreshIntervalSeconds { get; set; } = 10;
 
+    /// <summary>性能与诊断配置</summary>
+    public PerformanceSettings Performance { get; set; } = new();
+
     // === 控制参数 ===
 
     /// <summary>控制器配置</summary>
@@ -40,6 +43,46 @@ public class AppSettings
 
     [JsonIgnore]
     public double TargetMidpoint => Controller.TargetMidpoint;
+}
+
+/// <summary>
+/// 性能与诊断配置。
+/// </summary>
+public class PerformanceSettings
+{
+    public bool EnablePerfLog { get; set; } = true;
+    public int ProgressTextIntervalMs { get; set; } = 1000;
+    public bool CsvBackgroundIoMode { get; set; } = true;
+    public bool CachedFileLocate { get; set; } = true;
+    public int NewFileMaxLatencySeconds { get; set; } = 60;
+    public bool ShowOverlayOnAutoRefresh { get; set; } = false;
+    public bool ProcessPriorityBelowNormal { get; set; } = true;
+
+    [JsonIgnore]
+    public List<string> NormalizedFields { get; private set; } = new();
+
+    /// <summary>
+    /// 修正不安全的手工 JSON 值，并记录被修正的字段。
+    /// </summary>
+    public void Normalize()
+    {
+        NormalizedFields = new List<string>();
+
+        if (ProgressTextIntervalMs < 250)
+        {
+            ProgressTextIntervalMs = 250;
+            NormalizedFields.Add(nameof(ProgressTextIntervalMs));
+        }
+
+        if (NewFileMaxLatencySeconds <= 0)
+        {
+            NewFileMaxLatencySeconds = 60;
+            NormalizedFields.Add(nameof(NewFileMaxLatencySeconds));
+        }
+
+        foreach (string field in NormalizedFields)
+            System.Diagnostics.Debug.WriteLine($"[配置] Performance.{field} 已归一化");
+    }
 }
 
 /// <summary>

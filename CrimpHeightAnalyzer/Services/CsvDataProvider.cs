@@ -10,6 +10,25 @@ using Microsoft.Win32.SafeHandles;
 namespace CrimpHeightAnalyzer.Services;
 
 /// <summary>
+/// 单次 CSV 读取的结构化耗时与文件定位指标。
+/// </summary>
+public sealed record CsvReadMetrics(
+    long LocateDirMs,
+    long EnumCsvMs,
+    int CsvCount,
+    long OpenMs,
+    long SizeMs,
+    long ReadMs,
+    long ParseMs,
+    long BytesRead,
+    bool FileChanged,
+    bool Rescan,
+    bool UsedFallbackTs)
+{
+    public static CsvReadMetrics Empty { get; } = new(0, 0, 0, 0, 0, 0, 0, 0, false, false, false);
+}
+
+/// <summary>
 /// CSV 数据源 — 从文件系统读取压接数据。
 ///
 /// 核心设计：句柄常驻。
@@ -21,6 +40,13 @@ public class CsvDataProvider : IDataProvider
 {
     private readonly string _basePath;
     private readonly int _scanDays;
+    private readonly bool _csvBackgroundIoMode;
+    private readonly bool _cachedFileLocate;
+    private readonly int _newFileMaxLatencySeconds;
+    private readonly int _refreshIntervalSeconds;
+    private string? _cachedLatestFile;
+    private DateTime _lastScanUtc = DateTime.MinValue;
+    private DateTime _scanDate = DateTime.MinValue;
 
     // 句柄常驻：只打开一次，后续刷新复用
     private SafeFileHandle? _cachedHandle;
@@ -29,6 +55,8 @@ public class CsvDataProvider : IDataProvider
 
     public DateTime? LastDataTimestamp { get; private set; }
     public string LastReadDiagnostics { get; private set; } = "尚未读取";
+    public CsvReadMetrics LastReadMetrics { get; private set; } = CsvReadMetrics.Empty;
+    private string? _lastMetricsFilePath;
 
     /// <summary>实际扫描的根目录路径（规范化后）。</summary>
     public string BasePath => _basePath;
@@ -36,10 +64,20 @@ public class CsvDataProvider : IDataProvider
     /// <summary>最近一次成功读取的 CSV 文件全路径；未找到文件时为 null。</summary>
     public string? LastUsedFilePath { get; private set; }
 
-    public CsvDataProvider(string basePath, int scanDays = 0)
+    public CsvDataProvider(
+        string basePath,
+        int scanDays = 0,
+        bool csvBackgroundIoMode = true,
+        bool cachedFileLocate = true,
+        int newFileMaxLatencySeconds = 60,
+        int refreshIntervalSeconds = 10)
     {
         _basePath = basePath;
         _scanDays = scanDays;
+        _csvBackgroundIoMode = csvBackgroundIoMode;
+        _cachedFileLocate = cachedFileLocate;
+        _newFileMaxLatencySeconds = newFileMaxLatencySeconds;
+        _refreshIntervalSeconds = Math.Max(1, refreshIntervalSeconds);
     }
 
     public async Task<List<CrimpData>> GetLatestDataAsync(int count, CancellationToken cancellationToken = default)
@@ -51,38 +89,85 @@ public class CsvDataProvider : IDataProvider
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var locateTimer = Stopwatch.StartNew();
-            var latestFile = GetLatestCsvFile();
-            locateTimer.Stop();
-            LastUsedFilePath = latestFile;
+            bool backgroundModeStarted = _csvBackgroundIoMode
+                && SetCurrentThreadBackgroundMode(THREAD_MODE_BACKGROUND_BEGIN);
+            try
+            {
+            bool rescan = ShouldRescan(DateTime.UtcNow);
+            long locateDirMs = 0, enumCsvMs = 0;
+            int csvCount = 0;
+            string? latestFile = rescan
+                ? ScanLatestCsvFile(out locateDirMs, out enumCsvMs, out csvCount)
+                : _cachedLatestFile;
 
             long fileLength = 0;
             long bytesRead = 0;
             int fallbackTimestampCount = 0;
-            long openMs = 0, readMs = 0, parseMs = 0;
+            long openMs = 0, sizeMs = 0, readMs = 0, parseMs = 0;
+            List<CrimpData> allData = new();
 
             var readTimer = Stopwatch.StartNew();
-            var allData = latestFile != null
-                ? ReadTailAndParse(latestFile, count, cancellationToken,
+            if (latestFile != null)
+            {
+                allData = ReadTailAndParse(latestFile, count, cancellationToken,
                     out bytesRead, out fallbackTimestampCount,
-                    out openMs, out readMs, out parseMs, out fileLength)
-                : new List<CrimpData>();
+                    out openMs, out sizeMs, out readMs, out parseMs, out fileLength);
+
+                // The cached file disappeared between refreshes. Rescan and retry once in this refresh.
+                if (_cachedFileLocate && fileLength < 0)
+                {
+                    rescan = true;
+                    latestFile = ScanLatestCsvFile(out long retryLocateMs, out long retryEnumMs, out int retryCsvCount);
+                    locateDirMs += retryLocateMs;
+                    enumCsvMs += retryEnumMs;
+                    csvCount += retryCsvCount;
+
+                    if (latestFile != null)
+                    {
+                        allData = ReadTailAndParse(latestFile, count, cancellationToken,
+                            out long retryBytesRead, out int retryFallbackCount,
+                            out long retryOpenMs, out long retrySizeMs, out long retryReadMs,
+                            out long retryParseMs, out long retryFileLength);
+                        bytesRead = retryBytesRead;
+                        fallbackTimestampCount = retryFallbackCount;
+                        openMs += retryOpenMs;
+                        sizeMs += retrySizeMs;
+                        readMs += retryReadMs;
+                        parseMs += retryParseMs;
+                        fileLength = retryFileLength;
+                    }
+                }
+            }
             readTimer.Stop();
 
+            bool fileChanged = !string.Equals(_lastMetricsFilePath, latestFile, StringComparison.OrdinalIgnoreCase);
+            _lastMetricsFilePath = latestFile;
+            LastUsedFilePath = latestFile;
+
             long outerMs = readTimer.ElapsedMilliseconds;
-            long innerSum = openMs + readMs + parseMs;
+            long innerSum = openMs + sizeMs + readMs + parseMs;
             string scheduleTag = (outerMs - innerSum) > 100
                 ? $" | ⚠调度延迟={outerMs - innerSum}ms"
                 : "";
 
             LastReadDiagnostics = latestFile == null
-                ? $"定位 {locateTimer.ElapsedMilliseconds} ms | 未找到 CSV"
-                : $"定位 {locateTimer.ElapsedMilliseconds} ms | 总计 {outerMs} ms (打开={openMs} 读取={readMs} 解析={parseMs}) | 文件 {fileLength / 1024.0 / 1024.0:F1} MB | 实读 {bytesRead / 1024.0:F1} KB{scheduleTag} | {Path.GetFileName(latestFile)}";
+                ? $"定位 {locateDirMs + enumCsvMs} ms | 未找到 CSV"
+                : $"定位 {locateDirMs + enumCsvMs} ms | 总计 {outerMs} ms (打开={openMs} 读取={sizeMs + readMs} 解析={parseMs}) | 文件 {fileLength / 1024.0 / 1024.0:F1} MB | 实读 {bytesRead / 1024.0:F1} KB{scheduleTag} | {Path.GetFileName(latestFile)}";
+
+            LastReadMetrics = new CsvReadMetrics(
+                locateDirMs, enumCsvMs, csvCount, openMs, sizeMs, readMs, parseMs,
+                bytesRead, fileChanged, rescan, UsedFallbackTs: fallbackTimestampCount > 0);
 
             if (allData.Count > 0)
                 LastDataTimestamp = allData[^1].RecordedAt;
 
             return allData;
+            }
+            finally
+            {
+                if (backgroundModeStarted)
+                    SetCurrentThreadBackgroundMode(THREAD_MODE_BACKGROUND_END);
+            }
         }, cancellationToken);
     }
 
@@ -97,6 +182,7 @@ public class CsvDataProvider : IDataProvider
         out long bytesRead,
         out int fallbackTimestampCount,
         out long openMs,
+        out long sizeMs,
         out long readMs,
         out long parseMs,
         out long fileLength)
@@ -104,11 +190,13 @@ public class CsvDataProvider : IDataProvider
         bytesRead = 0;
         fallbackTimestampCount = 0;
         openMs = 0;
+        sizeMs = 0;
         readMs = 0;
         parseMs = 0;
         fileLength = 0;
         var reversed = new List<CrimpData>(maxCount);
         DateTime? fallbackRecordedAt = null;
+        DateTime fileLastWriteTimeLocal = DateTime.MinValue;
 
         try
         {
@@ -120,16 +208,21 @@ public class CsvDataProvider : IDataProvider
 
             if (handle == null || handle.IsInvalid || handle.IsClosed)
             {
+                var missingCheckTimer = Stopwatch.StartNew();
+                fileLength = GetRealFileSize(filePath, out _);
+                missingCheckTimer.Stop();
+                sizeMs = missingCheckTimer.ElapsedMilliseconds;
                 System.Diagnostics.Debug.WriteLine(
                     $"[CSV] 无法获取句柄 ({openMs}ms): {Path.GetFileName(filePath)}");
                 return reversed;
             }
 
-            // 第二步：读取尾部字节（句柄已打开，只做 GetFileSizeEx + Read，极快）
-            var readTimer2 = Stopwatch.StartNew();
-
-            // 用路径查实时文件大小，不用句柄查（句柄常驻时 GetFileSizeEx 可能返回缓存旧值）
-            fileLength = GetRealFileSize(filePath);
+            // 第二步：取实时文件大小并读取尾部字节。
+            // 用路径查实时文件大小，不用句柄查（句柄常驻时 GetFileSizeEx 可能返回缓存旧值）。
+            var sizeTimer = Stopwatch.StartNew();
+            fileLength = GetRealFileSize(filePath, out fileLastWriteTimeLocal);
+            sizeTimer.Stop();
+            sizeMs = sizeTimer.ElapsedMilliseconds;
             if (fileLength <= 0)
             {
                 InvalidateCachedHandle();
@@ -144,6 +237,7 @@ public class CsvDataProvider : IDataProvider
             int readSize = (int)(fileLength - readStart);
             var buffer = new byte[readSize];
 
+            var readTimer2 = Stopwatch.StartNew();
             int actualRead;
             try
             {
@@ -178,7 +272,7 @@ public class CsvDataProvider : IDataProvider
                 if (reversed.Count >= maxCount) break;
                 if (string.IsNullOrWhiteSpace(line)) continue;
 
-                var record = ParseLine(line, filePath, ref fallbackRecordedAt, out bool usedFallback);
+                var record = ParseLine(line, filePath, ref fallbackRecordedAt, fileLastWriteTimeLocal, out bool usedFallback);
                 if (usedFallback) fallbackTimestampCount++;
                 if (record != null) reversed.Add(record);
             }
@@ -271,6 +365,12 @@ public class CsvDataProvider : IDataProvider
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetFileSizeEx(SafeFileHandle hFile, out long lpFileSize);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetCurrentThread();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetThreadPriority(IntPtr hThread, int nPriority);
+
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool GetFileAttributesEx(
         string lpFileName,
@@ -293,10 +393,14 @@ public class CsvDataProvider : IDataProvider
     /// 句柄常驻时 GetFileSizeEx 可能返回缓存的旧值，
     /// 而 GetFileAttributesEx 每次都查询文件系统元数据，能看到相机最新写入后的真实大小。
     /// </summary>
-    private static long GetRealFileSize(string filePath)
+    private static long GetRealFileSize(string filePath, out DateTime lastWriteTimeLocal)
     {
+        lastWriteTimeLocal = DateTime.MinValue;
         if (GetFileAttributesEx(filePath, 0, out var data))
         {
+            long fileTime = ((long)(uint)data.ftLastWriteTime.dwHighDateTime << 32)
+                          | (uint)data.ftLastWriteTime.dwLowDateTime;
+            lastWriteTimeLocal = DateTime.FromFileTimeUtc(fileTime).ToLocalTime();
             return ((long)data.nFileSizeHigh << 32) | data.nFileSizeLow;
         }
         return -1;
@@ -306,6 +410,26 @@ public class CsvDataProvider : IDataProvider
     private const uint FILE_SHARE_READ_WRITE_DELETE = 0x00000001 | 0x00000002 | 0x00000004;
     private const uint OPEN_EXISTING = 3;
     private const uint FILE_FLAG_RANDOM_ACCESS = 0x10000000;
+    private const int THREAD_MODE_BACKGROUND_BEGIN = 0x00010000;
+    private const int THREAD_MODE_BACKGROUND_END = 0x00020000;
+
+    private static bool SetCurrentThreadBackgroundMode(int mode)
+    {
+        try
+        {
+            if (SetThreadPriority(GetCurrentThread(), mode))
+                return true;
+
+            int error = Marshal.GetLastWin32Error();
+            System.Diagnostics.Debug.WriteLine($"[CSV] 线程后台 I/O 模式调用失败 ({mode:X8}): {error}");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[CSV] 线程后台 I/O 模式异常 ({mode:X8}): {ex.Message}");
+        }
+
+        return false;
+    }
 
     private static SafeFileHandle? OpenFileNoOplock(string filePath)
     {
@@ -386,7 +510,8 @@ public class CsvDataProvider : IDataProvider
 
     private static CrimpData? ParseLine(
         string line, string filePath,
-        ref DateTime? fallbackRecordedAt, out bool usedFallbackTimestamp)
+        ref DateTime? fallbackRecordedAt, DateTime fileLastWriteTimeLocal,
+        out bool usedFallbackTimestamp)
     {
         usedFallbackTimestamp = false;
         var parts = line.Split(',');
@@ -395,7 +520,7 @@ public class CsvDataProvider : IDataProvider
         DateTime? recordedAt = ParseTimestamp(parts[0], filePath);
         if (!recordedAt.HasValue)
         {
-            fallbackRecordedAt ??= File.GetLastWriteTime(filePath);
+            fallbackRecordedAt ??= fileLastWriteTimeLocal;
             recordedAt = fallbackRecordedAt;
             usedFallbackTimestamp = true;
         }
@@ -468,12 +593,49 @@ public class CsvDataProvider : IDataProvider
 
     #region 文件定位
 
-    private string? GetLatestCsvFile()
+    private bool ShouldRescan(DateTime nowUtc)
     {
-        if (!Directory.Exists(_basePath)) return null;
+        if (!_cachedFileLocate || _cachedLatestFile == null || _scanDate != DateTime.Today)
+            return true;
+
+        long intervalSeconds = Math.Max(0L, (long)_newFileMaxLatencySeconds - _refreshIntervalSeconds);
+        return nowUtc - _lastScanUtc >= TimeSpan.FromSeconds(intervalSeconds);
+    }
+
+    private string? ScanLatestCsvFile(out long locateDirMs, out long enumCsvMs, out int csvCount)
+    {
+        var file = GetLatestCsvFile(out locateDirMs, out enumCsvMs, out csvCount);
+        _cachedLatestFile = file;
+        _lastScanUtc = DateTime.UtcNow;
+        _scanDate = DateTime.Today;
+        return file;
+    }
+
+    private string? GetLatestCsvFile(out long locateDirMs, out long enumCsvMs, out int csvCount)
+    {
+        locateDirMs = 0;
+        enumCsvMs = 0;
+        csvCount = 0;
+
+        var locateTimer = Stopwatch.StartNew();
+        if (!Directory.Exists(_basePath))
+        {
+            locateTimer.Stop();
+            locateDirMs = locateTimer.ElapsedMilliseconds;
+            return null;
+        }
+
         var cutoff = _scanDays > 0 ? DateTime.Today.AddDays(-_scanDays) : DateTime.MinValue;
         var latestDateDir = FindLatestDateDirectory(_basePath, cutoff);
-        return latestDateDir != null ? FindCsvInDirectory(latestDateDir) : null;
+        locateTimer.Stop();
+        locateDirMs = locateTimer.ElapsedMilliseconds;
+        if (latestDateDir == null) return null;
+
+        var enumTimer = Stopwatch.StartNew();
+        var latestFile = FindCsvInDirectory(latestDateDir, out csvCount);
+        enumTimer.Stop();
+        enumCsvMs = enumTimer.ElapsedMilliseconds;
+        return latestFile;
     }
 
     private static string? FindLatestDateDirectory(string basePath, DateTime cutoff)
@@ -495,8 +657,9 @@ public class CsvDataProvider : IDataProvider
             .OrderByDescending(GetDirDateSafe)
             .FirstOrDefault();
 
-    private static string? FindCsvInDirectory(string directory)
+    private static string? FindCsvInDirectory(string directory, out int csvCount)
     {
+        csvCount = 0;
         var options = new EnumerationOptions
         {
             RecurseSubdirectories = false,
@@ -505,7 +668,9 @@ public class CsvDataProvider : IDataProvider
         };
         try
         {
-            return Directory.EnumerateFiles(directory, "*.csv", options)
+            var files = Directory.EnumerateFiles(directory, "*.csv", options).ToList();
+            csvCount = files.Count;
+            return files
                 .OrderByDescending(GetFileDateSafe)
                 .ThenByDescending(GetLastWriteTimeUtcSafe)
                 .ThenByDescending(f => f, StringComparer.OrdinalIgnoreCase)

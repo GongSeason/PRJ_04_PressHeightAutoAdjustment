@@ -569,6 +569,9 @@
                                 <CheckBox Content="铆压#2" IsChecked="{Binding IsP2Visible}" Foreground="#FFFFB74D"
                                           Margin="6,0,0,0" VerticalAlignment="Center" FontSize="11"/>
                             </StackPanel>
+                            <CheckBox Content="散点显示" IsChecked="{Binding IsTrendScatterMode}" Foreground="#FFB0B0B0"
+                                      FontSize="11" Margin="6,0,0,0"
+                                      ToolTip="勾选后按压头分列竖向显示高度散点；取消恢复折线"/>
                         </StackPanel>
                     </Grid>
                     </Border>
@@ -908,7 +911,7 @@
         </Grid>
 
         <!-- 加载遮罩 -->
-        <Border Grid.Row="1" Background="#CC000000" Visibility="{Binding IsLoading, Converter={StaticResource BoolToVis}}">
+        <Border Grid.Row="1" Background="#CC000000" Visibility="{Binding IsLoadingOverlayVisible, Converter={StaticResource BoolToVis}}">
             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="560">
                 <TextBlock Text="正在加载..." Foreground="#FFFAFAFA" FontSize="18" HorizontalAlignment="Center"/>
                 <TextBlock Text="{Binding PerformanceText}" Foreground="#FF80CBC4" FontSize="12"
